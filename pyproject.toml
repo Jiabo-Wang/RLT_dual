@@ -23,6 +23,16 @@ lerobot = [
     "evdev>=1.7",
     "feetech-servo-sdk>=1.0.0",
 ]
+# CRP dual-arm follower. The native CrpRobotPy/libRobotService/license.key trio is
+# not pip-installable — see README_crp_dual.md.
+crp = [
+    "scipy>=1.11",  # mappers.so101_urdf rotation math
+]
+# No placo/pinocchio here on purpose. The only kinematics this project needs is SO101
+# *leader* FK — the CRP controller runs its own IK on the GP channel — so
+# mappers.urdf_fk computes it directly instead of pulling in ~38 native packages whose
+# cmeel-boost pin also fights LeRobot's numpy<2.3 requirement. tests/crp/test_urdf_fk.py
+# cross-checks against placo whenever it happens to be installed.
 test = ["pytest>=8.1", "pytest-timeout>=2.4"]
 wandb = ["wandb>=0.16"]
 dev = ["evo-rlt[lerobot,test,wandb]", "ruff>=0.6"]
@@ -40,6 +50,7 @@ evo-rlt-collect-default = "evo_rlt.adapters.lerobot.record.cli:collect_default_m
 evo-rlt-record = "evo_rlt.adapters.lerobot.record.cli:main"
 evo-rlt-online-train = "evo_rlt.adapters.lerobot.record.online_cli:main"
 evo-rlt-prune-online-state = "evo_rlt.adapters.lerobot.record.prune_state_cli:main"
+evo-rlt-crp-teleop = "evo_rlt.adapters.crp.cli_teleop:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

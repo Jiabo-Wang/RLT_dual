@@ -13,3 +13,16 @@ cache/
 wandb/
 data/
 .DS_Store
+
+# CRP native runtime — machine-licensed and vendor-proprietary, never publish.
+# license.key is bound to this machine's identifier; libRobotService.so and
+# CrpRobotPy.so are Crobotp's closed-source SDK. See README_crp_dual.md to
+# reassemble them locally. Paths are named explicitly rather than globbing *.so,
+# which would also swallow any compiled extension built inside the repo.
+license.key
+license-*.key
+identifier.id
+third_party/CrpRobotPy/
+src/evo_rlt/adapters/crp/getui_probe/libRobotService.so
+src/evo_rlt/adapters/crp/getui_probe/crp_getui_probe
+/license.key
