@@ -1,0 +1,50 @@
+from types import SimpleNamespace
+
+import torch
+
+import evo_rlt.adapters.lerobot.registry as registry
+from evo_rlt.adapters.lerobot.policies.dataset_rlt_ac import ChunkTransitionDataset
+
+
+def test_register_loads_chunk_transition_dataset_from_cache_dir(tmp_path):
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    torch.save(
+        [
+            {
+                "state_vec": torch.zeros(3),
+                "exec_chunk": torch.zeros(2, 1),
+                "outcome": torch.tensor(1.0),
+                "intervention_mask": torch.ones(2, 1),
+            }
+        ],
+        cache_dir / "chunk_transitions_train.pt",
+    )
+
+    import lerobot.datasets.factory as dataset_factory
+
+    registry._REGISTERED = False
+    registry.register()
+
+    cfg = SimpleNamespace(dataset=SimpleNamespace(repo_id=str(cache_dir)))
+    dataset = dataset_factory.make_dataset(cfg)
+
+    assert isinstance(dataset, ChunkTransitionDataset)
+    assert len(dataset) == 1
+    assert dataset[0]["state_vec"].shape == (3,)
+    assert dataset[0]["outcome"].item() == 1.0
+    assert dataset[0]["rankq_outcome"].item() == -1.0
+
+
+def test_chunk_transition_dataset_rejects_cache_without_actor_supervision(tmp_path):
+    torch.save(
+        [{"state_vec": torch.zeros(3), "exec_chunk": torch.zeros(2, 1)}],
+        tmp_path / "chunk_transitions_train.pt",
+    )
+
+    try:
+        ChunkTransitionDataset(tmp_path)
+    except ValueError as exc:
+        assert "predates direct offline Actor supervision" in str(exc)
+    else:
+        raise AssertionError("legacy cache should have been rejected")
