@@ -1,0 +1,72 @@
+{
+  "robot_id": "crp_dual",
+  "datasets": {
+    "root": "~/lerobot_data/crp_dual",
+    "fps": 16
+  },
+  "arms": [
+    {
+      "alias": "left_leader",
+      "type": "leader",
+      "port": "/dev/serial/by-id/usb-1a86_USB_Single_Serial_5B41533735-if00",
+      "calibration_dir": "~/.cache/huggingface/lerobot/calibration/teleoperators/crp_dual_leader",
+      "calibration_file": "~/.cache/huggingface/lerobot/calibration/teleoperators/crp_dual_leader/crp_dual_leader_left.json"
+    },
+    {
+      "alias": "right_leader",
+      "type": "leader",
+      "port": "/dev/serial/by-id/usb-1a86_USB_Single_Serial_5AAF220248-if00",
+      "calibration_dir": "~/.cache/huggingface/lerobot/calibration/teleoperators/crp_dual_leader",
+      "calibration_file": "~/.cache/huggingface/lerobot/calibration/teleoperators/crp_dual_leader/crp_dual_leader_right.json"
+    },
+    {
+      "alias": "left_follower",
+      "type": "follower",
+      "kind": "crp",
+      "ip": "192.168.0.100",
+      "gp_index": 10
+    },
+    {
+      "alias": "right_follower",
+      "type": "follower",
+      "kind": "crp",
+      "ip": "192.168.0.101",
+      "gp_index": 20
+    }
+  ],
+  "cameras": [
+    {
+      "alias": "top",
+      "port": {
+        "serial": "CP0BB53000A0"
+      },
+      "model": "Orbbec Gemini 335",
+      "width": 640,
+      "height": 480,
+      "fps": 30,
+      "fourcc": "YUYV"
+    },
+    {
+      "alias": "left_wrist",
+      "port": {
+        "serial": "235123073792"
+      },
+      "model": "RealSense D405",
+      "width": 640,
+      "height": 480,
+      "fps": 30,
+      "fourcc": "YUYV"
+    },
+    {
+      "alias": "right_wrist",
+      "port": {
+        "serial": "235123075818"
+      },
+      "model": "RealSense D405",
+      "width": 640,
+      "height": 480,
+      "fps": 30,
+      "fourcc": "YUYV"
+    }
+  ]
+}

@@ -27,6 +27,20 @@ def resolve_dataset_root(setup: dict[str, Any]) -> Path:
     return Path(dataset_root).expanduser()
 
 
+def resolve_fps(cli_fps: int | float | None, setup: dict[str, Any]) -> int | float:
+    """CLI ``--fps`` wins; otherwise the manifest's ``datasets.fps``; otherwise 30.
+
+    The control rate is a property of the cell, not of the run: CRP tops out near
+    16 Hz because a dual-arm GP send costs ~46 ms. Carrying it in the manifest keeps
+    every recording on that cell consistent, and keeps the dataset timestamps honest
+    -- a dataset labelled 30 fps that was captured at 16 is silently wrong.
+    Manifests without ``datasets.fps`` keep the previous default of 30.
+    """
+    if cli_fps is not None:
+        return cli_fps
+    return setup.get("datasets", {}).get("fps", 30)
+
+
 def get_sorted_followers(setup: dict[str, Any]) -> list[dict[str, Any]]:
     followers = [arm for arm in setup["arms"] if "follower" in arm["type"]]
     followers.sort(key=lambda arm: 0 if "left" in arm.get("alias", "") else 1)
@@ -44,6 +58,10 @@ CAMERA_RENAME = {"left_wrist": "wrist", "right_wrist": "wrist", "right_front": "
 LEFT_CAMERA_ALIASES = {"left_wrist"}
 RIGHT_CAMERA_ALIASES = {"right_wrist", "right_front"}
 TELEOP_ID = "bimanual_leader"
+# CRP keeps its own leader identity so the two cells can never overwrite each
+# other's calibration -- the id is also the calibration filename. Mirrors
+# evo_rlt.adapters.crp.teleop_config.LEADER_ID.
+CRP_TELEOP_ID = "crp_dual_leader"
 # Single-arm (so101_follower / so101_leader) ids. Kept separate from the
 # bimanual ids above so calibration staging never collides between modes.
 FOLLOWER_ID_SINGLE = "so_follower"
@@ -116,6 +134,8 @@ class RobotSetup:
     leaders: list[dict[str, Any]]
     left_cameras: dict[str, Any]
     right_cameras: dict[str, Any]
+    # Leader calibration identity: CRP's own, or the shared SO101 one.
+    teleop_id: str = TELEOP_ID
 
 
 @dataclass(frozen=True)
@@ -126,10 +146,39 @@ class RunPaths:
     log_file: Path
 
 
+def is_crp_setup(followers: list[dict[str, Any]]) -> bool:
+    """True when the manifest's followers are CRP arms rather than SO101 ones.
+
+    Gated on an explicit ``kind`` so a manifest without it takes exactly the code
+    path it took before CRP existed.
+    """
+    kinds = {str(f.get("kind", "")).lower() for f in followers}
+    if kinds == {"crp"}:
+        return True
+    if "crp" in kinds:
+        raise ValueError(
+            "Manifest mixes CRP and non-CRP followers; one robot cannot cover both. "
+            f"Followers: {[(f.get('alias'), f.get('kind')) for f in followers]}"
+        )
+    return False
+
+
 def load_robot_setup(setup_json: str | None) -> RobotSetup:
     setup = load_setup_json(setup_json)
     followers = get_sorted_followers(setup)
     leaders = get_sorted_leaders(setup)
+    if is_crp_setup(followers):
+        # CRPArmDual owns one flat camera dict and does not re-prefix per arm, so
+        # aliases survive verbatim -- `top` is not forced onto one of the arms, and
+        # a camera whose alias is in neither side's table is no longer dropped.
+        return RobotSetup(
+            setup,
+            followers,
+            leaders,
+            build_flat_camera_config(setup.get("cameras", [])),
+            {},
+            teleop_id=CRP_TELEOP_ID,
+        )
     if len(followers) == 1:
         # Single-arm: cameras are not split left/right, so they are all
         # stored under `left_cameras`; `right_cameras` stays empty and
@@ -144,22 +193,43 @@ def load_robot_setup(setup_json: str | None) -> RobotSetup:
     return RobotSetup(setup, followers, leaders, left_cameras, right_cameras)
 
 
-def build_single_arm_camera_config(cameras: list[dict[str, Any]]) -> dict[str, Any]:
-    """Single-arm cameras keep their manifest alias as-is (no left_/right_ split)."""
+def _camera_dict(camera: dict[str, Any]) -> dict[str, Any]:
+    """One camera's config dict, with ``port`` resolved to a stable device path.
+
+    Serialised into a ``--robot.cameras=`` CLI argument, so the resolved path is
+    stringified: ``json.dumps`` cannot encode a ``Path``.
+    """
+    from evo_rlt.adapters.lerobot.record.camera_resolve import resolve_camera_port
+
+    resolved = resolve_camera_port(camera["port"])
+    return {
+        "type": "opencv",
+        "index_or_path": str(resolved) if isinstance(resolved, Path) else resolved,
+        "width": camera.get("width", 640),
+        "height": camera.get("height", 480),
+        "fps": camera.get("fps", 30),
+    }
+
+
+def build_flat_camera_config(cameras: list[dict[str, Any]]) -> dict[str, Any]:
+    """Cameras keyed by their manifest alias, with no left/right split.
+
+    Used by the single-arm and CRP paths. The bimanual SO101 path cannot use this:
+    ``BiSOFollower`` owns one camera set per arm and re-prefixes the feature names,
+    so its cameras have to be split and un-prefixed first.
+    """
     out: dict[str, Any] = {}
     for camera in cameras:
         alias = camera["alias"]
-        camera_config: dict[str, Any] = {
-            "type": "opencv",
-            "index_or_path": camera["port"],
-            "width": camera.get("width", 640),
-            "height": camera.get("height", 480),
-            "fps": camera.get("fps", 30),
-        }
+        camera_config = _camera_dict(camera)
         if camera.get("fourcc"):
             camera_config["fourcc"] = camera["fourcc"]
         out[alias] = camera_config
     return out
+
+
+# Pre-existing name kept so nothing outside this module has to change.
+build_single_arm_camera_config = build_flat_camera_config
 
 
 def build_camera_configs(cameras: list[dict[str, Any]]) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -167,13 +237,7 @@ def build_camera_configs(cameras: list[dict[str, Any]]) -> tuple[dict[str, Any],
     right_cameras: dict[str, Any] = {}
     for camera in cameras:
         alias = camera["alias"]
-        camera_config: dict[str, Any] = {
-            "type": "opencv",
-            "index_or_path": camera["port"],
-            "width": camera.get("width", 640),
-            "height": camera.get("height", 480),
-            "fps": camera.get("fps", 30),
-        }
+        camera_config = _camera_dict(camera)
         if camera.get("fourcc"):
             camera_config["fourcc"] = camera["fourcc"]
         target_name = CAMERA_RENAME.get(alias, alias)
@@ -230,6 +294,12 @@ def stage_arm_calibration(arm: dict[str, Any], dst: Path) -> None:
 
 
 def stage_follower_calibrations(followers: list[dict[str, Any]], cal_dir: str) -> None:
+    # CRP arms are calibrated on their own controller; there is no host-side file to
+    # stage, and the manifest carries no ``calibration_dir`` for them. Guarding here
+    # rather than at each caller keeps every record subcommand covered.
+    if is_crp_setup(followers):
+        log.info("CRP followers: calibration lives on the controller, nothing to stage.")
+        return
     if len(followers) == 1:
         stage_arm_calibration(followers[0], Path(cal_dir) / f"{FOLLOWER_ID_SINGLE}.json")
         return
@@ -237,7 +307,9 @@ def stage_follower_calibrations(followers: list[dict[str, Any]], cal_dir: str) -
         stage_arm_calibration(arm, Path(cal_dir) / f"bimanual_{side}.json")
 
 
-def build_teleop_argv(leaders: list[dict[str, Any]], no_teleop: bool) -> list[str]:
+def build_teleop_argv(
+    leaders: list[dict[str, Any]], no_teleop: bool, teleop_id: str = TELEOP_ID
+) -> list[str]:
     if no_teleop:
         log.warning("Teleop disabled by --no-teleop")
         return []
@@ -261,12 +333,12 @@ def build_teleop_argv(leaders: list[dict[str, Any]], no_teleop: bool) -> list[st
         "--teleop.left_arm_config.use_degrees=true",
         f"--teleop.right_arm_config.port={leaders[1]['port']}",
         "--teleop.right_arm_config.use_degrees=true",
-        f"--teleop.id={TELEOP_ID}",
+        f"--teleop.id={teleop_id}",
     ]
 
 
 def stage_leader_calibrations(
-    leaders: list[dict[str, Any]], teleop_argv: list[str]
+    leaders: list[dict[str, Any]], teleop_argv: list[str], teleop_id: str = TELEOP_ID
 ) -> TemporaryDirectory[str] | None:
     if not teleop_argv:
         return None
@@ -275,7 +347,7 @@ def stage_leader_calibrations(
         stage_arm_calibration(leaders[0], Path(leader_cal_dir.name) / f"{TELEOP_ID_SINGLE}.json")
     else:
         for side, arm in (("left", leaders[0]), ("right", leaders[1])):
-            stage_arm_calibration(arm, Path(leader_cal_dir.name) / f"{TELEOP_ID}_{side}.json")
+            stage_arm_calibration(arm, Path(leader_cal_dir.name) / f"{teleop_id}_{side}.json")
     teleop_argv.append(f"--teleop.calibration_dir={leader_cal_dir.name}")
     return leader_cal_dir
 
@@ -286,6 +358,26 @@ def build_robot_argv(
     right_cameras: dict[str, Any],
     cal_dir: str,
 ) -> list[str]:
+    if is_crp_setup(followers):
+        left, right = followers[0], followers[1]
+        # Importing the config registers ``crp_arm_dual`` as a RobotConfig subclass.
+        # draccus builds --robot.type's choices from that registry at parse time, and
+        # nothing else on the record path imports the CRP stack, so without this the
+        # argv below is rejected as an invalid choice.
+        from evo_rlt.adapters.crp.config_arm_dual import CRPArmDualConfig  # noqa: F401
+
+        # No --robot.calibration_dir: CRP arms are calibrated on the controller, not
+        # against a host-side file the way STS3215 servos are.
+        return [
+            "--robot.type=crp_arm_dual",
+            "--robot.id=crp_dual",
+            f"--robot.ip1={left['ip']}",
+            f"--robot.ip2={right['ip']}",
+            f"--robot.gp_register_left={left.get('gp_index', 10)}",
+            f"--robot.gp_register_right={right.get('gp_index', 20)}",
+            f"--robot.cameras={json.dumps(left_cameras)}",
+        ]
+
     if len(followers) == 1:
         return [
             "--robot.type=so101_follower",

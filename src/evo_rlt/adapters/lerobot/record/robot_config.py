@@ -13,10 +13,16 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from lerobot.cameras.opencv.configuration_opencv import OpenCVCameraConfig
 from lerobot.robots.bi_so_follower.config_bi_so_follower import BiSOFollowerConfig
 from lerobot.robots.so_follower.config_so_follower import SOFollowerConfig, SOFollowerRobotConfig
+
+from .camera_resolve import resolve_camera_port
+
+if TYPE_CHECKING:  # avoid importing the CRP stack (and its native SDK) at module load
+    from evo_rlt.adapters.crp.config_arm_dual import CRPArmDualConfig
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +51,22 @@ def _find_arm_port(arms: list[dict], side: str) -> str:
     )
 
 
+def _build_camera_config(cam: dict) -> OpenCVCameraConfig:
+    """Build one camera config, resolving ``port`` to a stable device path.
+
+    ``fourcc`` is forwarded rather than dropped: a depth camera's colour node often
+    offers exactly one format (the D405s here are YUYV-only), and letting OpenCV
+    negotiate can land on a different one and silently change frame timing.
+    """
+    return OpenCVCameraConfig(
+        index_or_path=resolve_camera_port(cam["port"]),
+        fps=cam.get("fps", 30),
+        width=cam.get("width", 640),
+        height=cam.get("height", 480),
+        fourcc=cam.get("fourcc"),
+    )
+
+
 def _assign_camera_to_arm(
     alias: str,
     cam_cfg: OpenCVCameraConfig,
@@ -64,6 +86,55 @@ def _assign_camera_to_arm(
     right_cams[alias] = cam_cfg
 
 
+def _load_crp_dual_config(
+    followers: list[dict], cameras: list[dict], robot_id: str | None,
+) -> "CRPArmDualConfig":
+    """Build a ``CRPArmDualConfig`` from manifest followers marked ``"kind": "crp"``.
+
+    Unlike ``BiSOFollower``, ``CRPArmDual`` holds one flat camera dict and does not
+    prefix features per arm, so aliases are used verbatim -- ``top`` stays ``top``
+    rather than being forced onto one arm. That also means ``top`` needs no
+    ``left_``/``right_`` prefix just to be loadable, which the bimanual SO101 path
+    would otherwise require.
+    """
+    from evo_rlt.adapters.crp.config_arm_dual import CRPArmDualConfig
+
+    def _ip(side: str) -> str:
+        for f in followers:
+            if side in f.get("alias", "").lower():
+                ip = f.get("ip")
+                if not ip:
+                    raise ValueError(f"CRP follower {f.get('alias')!r} has no 'ip'")
+                return str(ip)
+        raise ValueError(
+            f"No {side} CRP follower in manifest. Found: {[f.get('alias') for f in followers]}"
+        )
+
+    cams: dict = {alias: _build_camera_config(c) for c in cameras if (alias := c["alias"])}
+
+    kwargs: dict = {"ip1": _ip("left"), "ip2": _ip("right"), "cameras": cams}
+    # GP (cartesian, what send_action writes) and GJ (joint, seeded on connect) are
+    # separate register spaces that happen to share the numbers 10/20 on this cell.
+    # Keep the manifest keys distinct so the two can never be cross-assigned.
+    for manifest_key, left_key, right_key in (
+        ("gp_index", "gp_register_left", "gp_register_right"),
+        ("gj_register", "gj_register_left", "gj_register_right"),
+    ):
+        for side, cfg_key in (("left", left_key), ("right", right_key)):
+            for f in followers:
+                if side in f.get("alias", "").lower() and manifest_key in f:
+                    kwargs[cfg_key] = int(f[manifest_key])
+
+    cfg = CRPArmDualConfig(**kwargs)
+    if robot_id:
+        cfg.id = robot_id
+    logger.info(
+        "Loaded CRP dual robot config: ip1=%s ip2=%s cameras=%s",
+        cfg.ip1, cfg.ip2, sorted(cams),
+    )
+    return cfg
+
+
 def _load_single_arm_config(
     follower: dict, cameras: list[dict], robot_id: str | None,
 ) -> SOFollowerRobotConfig:
@@ -72,12 +143,7 @@ def _load_single_arm_config(
     cams: dict[str, OpenCVCameraConfig] = {}
     for cam in cameras:
         alias = cam["alias"]
-        cams[alias] = OpenCVCameraConfig(
-            index_or_path=cam["port"],
-            fps=cam.get("fps", 30),
-            width=cam.get("width", 640),
-            height=cam.get("height", 480),
-        )
+        cams[alias] = _build_camera_config(cam)
     logger.info(
         "Loaded single-arm robot config: port=%s (%d cams)",
         follower["port"], len(cams),
@@ -88,15 +154,18 @@ def _load_single_arm_config(
     return cfg
 
 
-def load_robot_config_from_json(path: str | Path) -> BiSOFollowerConfig | SOFollowerRobotConfig:
+def load_robot_config_from_json(
+    path: str | Path,
+) -> "BiSOFollowerConfig | SOFollowerRobotConfig | CRPArmDualConfig":
     """Load a robot config from a roboclaw-compatible setup.json.
 
     Args:
         path: Path to the JSON config file.
 
     Returns:
-        A `SOFollowerRobotConfig` when the manifest lists exactly one
-        follower arm, otherwise a fully populated `BiSOFollowerConfig`.
+        A `CRPArmDualConfig` when the followers are marked `"kind": "crp"`,
+        a `SOFollowerRobotConfig` when the manifest lists exactly one follower
+        arm, otherwise a fully populated `BiSOFollowerConfig`.
     """
     path = Path(path)
     with open(path) as f:
@@ -107,6 +176,16 @@ def load_robot_config_from_json(path: str | Path) -> BiSOFollowerConfig | SOFoll
     robot_id = data.get("robot_id", data.get("id"))
 
     followers = [a for a in arms if "follower" in a.get("type", "").lower()]
+
+    crp_followers = [f for f in followers if f.get("kind", "").lower() == "crp"]
+    if crp_followers:
+        if len(crp_followers) != len(followers):
+            raise ValueError(
+                "Manifest mixes CRP and non-CRP followers; one robot config cannot "
+                f"cover both. Followers: {[(f.get('alias'), f.get('kind')) for f in followers]}"
+            )
+        return _load_crp_dual_config(crp_followers, cameras, robot_id)
+
     if len(followers) == 1:
         return _load_single_arm_config(followers[0], cameras, robot_id)
 
@@ -118,12 +197,7 @@ def load_robot_config_from_json(path: str | Path) -> BiSOFollowerConfig | SOFoll
 
     for cam in cameras:
         alias = cam["alias"]
-        cam_cfg = OpenCVCameraConfig(
-            index_or_path=cam["port"],
-            fps=cam.get("fps", 30),
-            width=cam.get("width", 640),
-            height=cam.get("height", 480),
-        )
+        cam_cfg = _build_camera_config(cam)
         _assign_camera_to_arm(alias, cam_cfg, left_cams, right_cams)
 
     logger.info(

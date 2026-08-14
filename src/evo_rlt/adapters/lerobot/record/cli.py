@@ -19,7 +19,12 @@ def add_common_record_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--num-episodes", type=int, default=1)
     parser.add_argument("--episode-time-s", type=int, default=3000)
     parser.add_argument("--reset-time-s", type=int, default=None)
-    parser.add_argument("--fps", type=int, default=30)
+    parser.add_argument(
+        "--fps",
+        type=int,
+        default=None,
+        help="Control/dataset rate. Defaults to datasets.fps in the setup manifest, or 30 Hz.",
+    )
     parser.add_argument("--setup-json", default=None)
     parser.add_argument("--dataset-tag", default=None)
     parser.add_argument("--vcodec", default="h264")
@@ -65,7 +70,12 @@ def add_default_collect_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--task", default=DEFAULT_COLLECT_TASK)
     parser.add_argument("--num-episodes", type=int, default=5)
     parser.add_argument("--episode-time-s", type=int, default=3000)
-    parser.add_argument("--fps", type=int, default=30)
+    parser.add_argument(
+        "--fps",
+        type=int,
+        default=None,
+        help="Control/dataset rate. Defaults to datasets.fps in the setup manifest, or 30 Hz.",
+    )
     parser.add_argument("--setup-json", default=None)
     parser.add_argument("--dataset-tag", default=DEFAULT_COLLECT_DATASET_TAG)
     parser.add_argument("--vcodec", default="h264")
@@ -167,7 +177,12 @@ def build_parser() -> argparse.ArgumentParser:
     live.add_argument("--chunk-exec-steps", type=int, default=25)
     live.add_argument("--task", default="Insert the copper screw into the black sleeve.")
     live.add_argument("--duration", type=float, default=120.0)
-    live.add_argument("--fps", type=float, default=30.0)
+    live.add_argument(
+        "--fps",
+        type=float,
+        default=None,
+        help="Control rate. Defaults to datasets.fps in the setup manifest, or 30 Hz.",
+    )
     live.add_argument("--setup-json", default=None)
     live.add_argument("--dry-run", action="store_true", default=False)
     add_rtc_args(live)

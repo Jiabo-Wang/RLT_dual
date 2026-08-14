@@ -223,6 +223,27 @@ def test_default_collect_parser_uses_open_source_safe_defaults():
     assert args.rtc_action_queue_size_to_get_new_actions == 30
 
 
+def test_control_fps_uses_manifest_default_for_crp():
+    args = SimpleNamespace(fps=None)
+    setup = SimpleNamespace(setup={"datasets": {"fps": 16}})
+
+    runner._resolve_control_fps(args, setup)
+
+    assert args.fps == 16
+
+
+def test_control_fps_keeps_so101_fallback_and_cli_override():
+    args = SimpleNamespace(fps=None)
+    setup = SimpleNamespace(setup={"datasets": {}})
+    runner._resolve_control_fps(args, setup)
+    assert args.fps == 30
+
+    args.fps = 12
+    setup.setup["datasets"]["fps"] = 16
+    runner._resolve_control_fps(args, setup)
+    assert args.fps == 12
+
+
 def test_default_collect_full_mode_uses_r_key_as_episode_outcome():
     parser = build_parser()
     args = parser.parse_args(["collect", "--policy-path", "/tmp/ac", "--rlt-toggle-key", "r"])

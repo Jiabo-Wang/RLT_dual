@@ -476,6 +476,43 @@ def advance_dual_gp_teleop(
     timing.last_gr = _send_gripper_ui_if_due(cfg, arms, now, timing.last_gr)
 
 
+# An arm sitting this far from what it was last told to do is not tracking at all.
+# Measured on a healthy run: steady state is 0-3 mm, and whipping the leader around
+# peaks near 47 mm of ordinary lag, so 30 mm cried wolf. A genuinely refused GP target
+# parks the arm indefinitely and the error grows with however far the leader has since
+# travelled, which clears this comfortably.
+FOLLOW_ERROR_STALLED_MM = 80.0
+
+
+def _follow_error_line(robot: CRPArmDual, arms: tuple[ArmTeleopState, ArmTeleopState]) -> str:
+    """Compare each arm's measured TCP against the pose it was last sent.
+
+    ``set_GPs`` returning true only means the controller accepted the write, not that
+    it executed it — a rejected pose (unreachable, singular, program not consuming the
+    register) looks identical to success from Python. Reading the TCP back is the only
+    way to tell, so the heartbeat does it once a second and says STALLED when an arm
+    stops following. Two SDK reads at 1 Hz cost ~86 ms/s against a 16 Hz loop; that is
+    affordable and it turns a silent failure into a visible one.
+    """
+    parts: list[str] = []
+    for arm in arms:
+        if not arm.last_sent:
+            parts.append(f"{arm.label}=(未发送)")
+            continue
+        try:
+            tcp = _read_tcp(robot, arm.label)
+        except Exception as exc:  # keep teleop running; this is diagnostics only
+            parts.append(f"{arm.label}=(TCP读取失败: {type(exc).__name__})")
+            continue
+        err = math.dist(tcp[:3], arm.last_sent[:3])
+        flag = "  <<< STALLED" if err > FOLLOW_ERROR_STALLED_MM else ""
+        parts.append(
+            f"{arm.label}: 目标=({arm.last_sent[0]:.0f},{arm.last_sent[1]:.0f},{arm.last_sent[2]:.0f}) "
+            f"实测=({tcp[0]:.0f},{tcp[1]:.0f},{tcp[2]:.0f}) 误差={err:.0f}mm{flag}"
+        )
+    return "\t跟随: " + " | ".join(parts)
+
+
 def _log_teleop_ready(
     cfg: TeleoperateDualCRPConfig,
     init_gps: tuple[list[float], list[float]],
@@ -578,7 +615,13 @@ def teleop_loop_crp_dual(
                             "\tR_GP=[%.0f,%.0f,%.0f] R_UI50=%s, R_POSIT=?, R_SPEED=?, R_TORQUE=?"
                             % (*ra.command_gp[:3], ra.last_ui50)
                         )
-                    logger.info("loop=%d\n%s\n%s", loop_i, left_line, right_line)
+                    logger.info(
+                        "loop=%d\n%s\n%s\n%s",
+                        loop_i,
+                        left_line,
+                        right_line,
+                        _follow_error_line(robot, arms),
+                    )
                     last_hb = now
     finally:
         logger.info("Teleop loop ended: reason=%s loops=%d", stop_reason, loop_i)

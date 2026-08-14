@@ -11,6 +11,7 @@ from typing import Any
 
 from evo_rlt.adapters.lerobot import register
 from evo_rlt.adapters.lerobot.record.common import (
+    resolve_fps,
     build_dataset_argv,
     build_policy_overrides,
     build_robot_argv,
@@ -27,6 +28,16 @@ from evo_rlt.adapters.lerobot.record.common import (
 )
 
 log = logging.getLogger(__name__)
+
+
+def _resolve_control_fps(args: argparse.Namespace, setup) -> None:
+    """Resolve a per-robot control rate without changing the SO101 default."""
+    fps = args.fps
+    if fps is None:
+        fps = setup.setup.get("datasets", {}).get("fps", 30)
+    if isinstance(fps, bool) or not isinstance(fps, (int, float)) or fps <= 0:
+        raise ValueError(f"Control fps must be a positive number, got {fps!r}")
+    args.fps = fps
 
 
 def prepare_lerobot_runtime(
@@ -547,10 +558,12 @@ def run_collect(args: argparse.Namespace) -> None:
         validation_keys["episode_outcome_key"] = episode_outcome_key
     _validate_distinct_keys(**validation_keys)
     setup = load_robot_setup(args.setup_json)
+    args.fps = resolve_fps(args.fps, setup.setup)
+    _resolve_control_fps(args, setup)
     paths = resolve_run_paths(setup.setup, args.dataset_tag, "eval_vla_rlt_vla")
     configure_logging(paths.log_file, args.log_level)
     remove_existing_dataset(paths.dataset_root)
-    teleop_argv = build_teleop_argv(setup.leaders, args.no_teleop)
+    teleop_argv = build_teleop_argv(setup.leaders, args.no_teleop, setup.teleop_id)
 
     if args.policy_path is None:
         raise ValueError("default collection requires --policy-path")
@@ -560,7 +573,7 @@ def run_collect(args: argparse.Namespace) -> None:
     leader_cal_dir = None
     with TemporaryDirectory(prefix="record-collect-") as cal_dir:
         stage_follower_calibrations(setup.followers, cal_dir)
-        leader_cal_dir = stage_leader_calibrations(setup.leaders, teleop_argv)
+        leader_cal_dir = stage_leader_calibrations(setup.leaders, teleop_argv, setup.teleop_id)
         sys.argv = build_default_collect_record_argv(args, setup, paths, cal_dir, teleop_argv)
         print_collect_summary(args, paths)
         if args.dry_run:
@@ -670,6 +683,8 @@ def print_collect_summary(args: argparse.Namespace, paths) -> None:
 def run_segment(args: argparse.Namespace) -> None:
     set_offline_env()
     setup = load_robot_setup(args.setup_json)
+    args.fps = resolve_fps(args.fps, setup.setup)
+    _resolve_control_fps(args, setup)
     paths = resolve_run_paths(setup.setup, args.dataset_tag, f"eval_{args.critical_source}_segment")
     configure_logging(paths.log_file, args.log_level)
     remove_existing_dataset(paths.dataset_root)
@@ -679,14 +694,14 @@ def run_segment(args: argparse.Namespace) -> None:
     if args.rtc and not args.vla_ref and args.critical_source == "rlt":
         raise ValueError("RTC RLT recording requires --vla-ref; --no-vla-ref hides the guided reference")
 
-    teleop_argv = build_teleop_argv(setup.leaders, args.no_teleop)
+    teleop_argv = build_teleop_argv(setup.leaders, args.no_teleop, setup.teleop_id)
     if args.initial_source == "teleop" and not teleop_argv:
         raise ValueError("--initial-source teleop requires leader teleop arms")
 
     leader_cal_dir = None
     with TemporaryDirectory(prefix="record-segment-") as cal_dir:
         stage_follower_calibrations(setup.followers, cal_dir)
-        leader_cal_dir = stage_leader_calibrations(setup.leaders, teleop_argv)
+        leader_cal_dir = stage_leader_calibrations(setup.leaders, teleop_argv, setup.teleop_id)
         if not args.dry_run and args.preflight:
             preflight_motor_connections(
                 setup.followers,
@@ -837,6 +852,8 @@ def run_full(args: argparse.Namespace) -> None:
             args.rtc_action_queue_size_to_get_new_actions = 30
 
     setup = load_robot_setup(args.setup_json)
+    args.fps = resolve_fps(args.fps, setup.setup)
+    _resolve_control_fps(args, setup)
     # LeRobot reserves dataset names beginning with ``eval_`` for policy
     # rollouts.  A teleoperation-only recording has no policy, so using that
     # prefix makes LeRobot's dataset-name sanity check reject the run.
@@ -844,7 +861,7 @@ def run_full(args: argparse.Namespace) -> None:
     paths = resolve_run_paths(setup.setup, args.dataset_tag, dataset_prefix)
     configure_logging(paths.log_file, args.log_level)
     remove_existing_dataset(paths.dataset_root)
-    teleop_argv = build_teleop_argv(setup.leaders, args.no_teleop)
+    teleop_argv = build_teleop_argv(setup.leaders, args.no_teleop, setup.teleop_id)
 
     if args.initial_source == "vla" and args.policy_path is None:
         raise ValueError("full recording with --initial-source vla requires --policy-path")
@@ -856,7 +873,7 @@ def run_full(args: argparse.Namespace) -> None:
     leader_cal_dir = None
     with TemporaryDirectory(prefix="record-full-") as cal_dir:
         stage_follower_calibrations(setup.followers, cal_dir)
-        leader_cal_dir = stage_leader_calibrations(setup.leaders, teleop_argv)
+        leader_cal_dir = stage_leader_calibrations(setup.leaders, teleop_argv, setup.teleop_id)
         sys.argv = [
             "record_full",
             *build_robot_argv(setup.followers, setup.left_cameras, setup.right_cameras, cal_dir),
@@ -944,6 +961,8 @@ def run_full(args: argparse.Namespace) -> None:
 def run_live(args: argparse.Namespace) -> None:
     set_offline_env()
     setup = load_robot_setup(args.setup_json)
+    args.fps = resolve_fps(args.fps, setup.setup)
+    _resolve_control_fps(args, setup)
     eval_script = Path(args.eval_script).expanduser()
     if not eval_script.exists():
         raise FileNotFoundError(f"RTC eval script not found: {eval_script}")

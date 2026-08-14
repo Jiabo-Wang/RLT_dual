@@ -24,9 +24,13 @@ JOINT_POS_KEYS: tuple[str, ...] = tuple(
 ACTION_UI_KEYS: tuple[str, ...] = ("left_ui50", "right_ui50")
 
 
-# Matches record/common.py TELEOP_ID, so CRP teleop reuses the same leader calibration
-# as the existing SO101 recording flow.
-LEADER_ID = "bimanual_leader"
+# CRP's own leader identity. Deliberately *not* shared with the SO101 flow's
+# ``bimanual_leader``: the same physical arms get posed differently for the two cells,
+# and a shared id means whichever project calibrated last silently wins. The id also
+# becomes the calibration filename, so it has to be unique on its own.
+LEADER_ID = "crp_dual_leader"
+# Own directory too, so nothing else writes here even if the ids ever collide.
+LEADER_CALIBRATION_DIRNAME = "crp_dual_leader"
 
 # Addressed by USB serial rather than /dev/ttyACM*, whose numbering follows kernel
 # enumeration order and therefore swaps when the arms are replugged in a different
@@ -38,16 +42,20 @@ LEADER_PORT_RIGHT = "/dev/serial/by-id/usb-1a86_USB_Single_Serial_5AAF220248-if0
 
 
 def default_leader_calibration_dir():
-    """``bi_so_leader`` calibration lives one directory up from where it is looked up.
+    """``teleoperators/crp_dual_leader/`` -- CRP's own directory, always.
 
-    ``BiSOLeader`` nests two ``SOLeader`` children, and each child auto-resolves its
-    calibration to ``teleoperators/so_leader/{id}_{side}.json`` — but
-    ``lerobot-calibrate --teleop.type=bi_so_leader`` writes to
-    ``teleoperators/bi_so_leader/``. Point at the latter explicitly; returning None
-    lets LeRobot fall back to its own default (and then prompt to calibrate).
+    Returns the path unconditionally and creates it if missing. Returning ``None``
+    when the directory did not exist (the previous behaviour) handed control back to
+    LeRobot's default resolution, and ``BiSOLeader``'s nested ``SOLeader`` children
+    resolve that to ``teleoperators/so_leader/{id}_{side}.json`` -- a *different*
+    directory that other setups also write to. A calibration then landed there,
+    teleop kept reading the intended directory, and the recalibration silently did
+    nothing. With no fallback branch that cannot recur: the only file this flow can
+    read is the only file it can write.
     """
-    d = HF_LEROBOT_CALIBRATION / TELEOPERATORS / "bi_so_leader"
-    return d if d.is_dir() else None
+    d = HF_LEROBOT_CALIBRATION / TELEOPERATORS / LEADER_CALIBRATION_DIRNAME
+    d.mkdir(parents=True, exist_ok=True)
+    return d
 
 
 def _default_teleop() -> BiSOLeaderConfig:
@@ -87,10 +95,25 @@ class ArmGPConfig:
     # mappers.so101_urdf. The SO101->CRP mount rotation is still unmeasured, so
     # (axis, sign) has 4 candidate combinations to try on hardware.
     wrist_flex_axis: str = "y"
-    wrist_roll_max_step_deg: float = 12.0
-    wrist_flex_max_step_deg: float | None = 12.0
+    # Per GP send, not per second. These are the values that were actually in force
+    # before fps moved to 16: `_per_loop_step` scales them by ``gp_send_fps / fps``,
+    # which was 50/80 = 0.625, so a configured 12.0 acted as 7.5. Raising fps left the
+    # numbers alone but multiplied every cap by 1.6, and the left arm -- whose caps are
+    # already an order of magnitude looser than the right's -- stopped executing GP
+    # while its gripper kept working. Keep ``fps == gp_send_fps`` so the ratio stays 1
+    # and these numbers mean what they say.
+    wrist_roll_max_step_deg: float = 7.5
+    wrist_flex_max_step_deg: float | None = 7.5
+    # Lower bound on commanded Z, in CRP base mm. This is the one that limits downward
+    # motion — it stops the tool from being driven into the table.
     z_floor_mm: float = 42.0
-    z_scale: float = 2.0
+    # Gain on leader Z travel: 2.0 means the follower rises twice as far as the leader,
+    # to make up for the SO101's smaller reach. Inherited from the CRP fork and never
+    # measured on this cell, where it doubles every Z target and so doubles the chance
+    # of leaving the reachable workspace — and an unreachable GP target is refused
+    # silently, with set_GPs still returning true. Back to 1:1 until the reachable Z
+    # range here is actually known; raise it deliberately if leader travel is short.
+    z_scale: float = 1.0
 
 
 @dataclass
@@ -101,8 +124,8 @@ class RightArmGPConfig(ArmGPConfig):
     # Inherited from the CRP fork, which capped the right arm an order of magnitude
     # tighter than the left (2°/1° vs 12°/12°) without recording why. Kept as-is until
     # the asymmetry is explained on hardware — do not relax it by analogy with the left.
-    wrist_roll_max_step_deg: float = 2.0
-    wrist_flex_max_step_deg: float | None = 1.0
+    wrist_roll_max_step_deg: float = 1.25
+    wrist_flex_max_step_deg: float | None = 0.625
 
 
 @dataclass
@@ -113,9 +136,19 @@ class TeleoperateDualCRPConfig:
     robot: CRPArmDualConfig = field(default_factory=_default_robot_for_teleop)
     left: ArmGPConfig = field(default_factory=ArmGPConfig)
     right: RightArmGPConfig = field(default_factory=RightArmGPConfig)
-    fps: int = 80
-    gp_position_step_mm: float = 80.0
-    gp_send_fps: int = 50
+    # 16 Hz (62.5 ms/frame) is the control rate, set by measurement rather than choice.
+    # A dual-arm GP send costs ~46 ms: one SDK call blocks ~43 ms waiting on the
+    # controller's communication cycle, and the second arm's call rides the same
+    # window nearly free (measured 21.5 Hz loops against a 46 ms floor of 21.7 Hz).
+    # That leaves ~16 ms per frame for leader reads, FK, cameras and dataset writes.
+    # 20 Hz would leave 4 ms and is not achievable; the previous 80/50 defaults were
+    # never reached at all -- the loop ran at 16-21 Hz regardless, which silently made
+    # the configured fps a lie and would have written wrong dataset timestamps.
+    fps: int = 16
+    # Also per GP send; 80.0 with the old 0.625 ratio acted as 50.0.
+    gp_position_step_mm: float = 50.0
+    # Every main-loop tick sends; at 16 Hz there is no headroom for a slower GP rate.
+    gp_send_fps: int = 16
     # 0 = send gripper on every main-loop tick (uses ``fps``); else cap UI50 rate (Hz).
     gripper_send_fps: int = 0
     # Min SO101 gripper.pos change (0–100) before sending UI50 (~0.39 ≈ one UI step).

@@ -60,6 +60,22 @@ _BIMANUAL_UI_KEYS: tuple[str, ...] = tuple(
     f"{arm}_ui{idx}" for arm in ("left", "right") for idx in (50, 56, 57, 58)
 )
 
+# Action space: the cartesian GP pose per arm plus the gripper command.
+#
+# This mirrors what teleop actually puts on the wire (leader FK -> cartesian -> GP),
+# so a recorded action is byte-for-byte the command the controller received. Logging
+# joint angles instead would mean storing something the loop never sent, and would
+# cost an extra ``read_joints`` per frame -- ~42 ms against a ~16 fps budget.
+#
+# Units follow the SDK: xyz in millimetres, rpy in degrees.
+_GP_COMPONENTS: tuple[str, ...] = ("x", "y", "z", "roll", "pitch", "yaw")
+_BIMANUAL_GP_KEYS: tuple[str, ...] = tuple(
+    f"{arm}_{axis}.pos" for arm in ("left", "right") for axis in _GP_COMPONENTS
+)
+# ui50 is the only commandable UI register; 56-58 are gripper feedback and belong
+# to the observation, not the action.
+_BIMANUAL_UI_ACTION_KEYS: tuple[str, ...] = ("left_ui50", "right_ui50")
+
 
 class CRPArmDual(Robot):
     """One CrpRobotPy session, two controllers (ip1 + ip2)."""
@@ -76,6 +92,8 @@ class CRPArmDual(Robot):
         self.crp_arm_robot = CrpRobotPy()
         self._second_connected = False
         self._sdk_lock = threading.Lock()
+        # Last ui50 written per arm; surfaced in the observation (see _ui_ft).
+        self._last_ui50: dict[str, float] = {"left": 0.0, "right": 0.0}
         self.cameras = make_cameras_from_configs(config.cameras)
 
     @property
@@ -84,7 +102,17 @@ class CRPArmDual(Robot):
 
     @property
     def _ui_ft(self) -> dict[str, type]:
-        return dict.fromkeys(_BIMANUAL_UI_KEYS, float)
+        """Gripper state in the observation: the last ui50 command, not a fresh read.
+
+        ui56-58 (position / speed / torque feedback) are the real measurement, but
+        each UI read is a ~43 ms SDK round trip -- six of them per frame does not fit
+        a 62.5 ms budget. They are reachable through the ``crp_getui_probe``
+        subprocess at 1 Hz, which teleop starts and the record path currently does
+        not. Until that is wired up, the observation carries the value the gripper
+        was last told to go to, which costs nothing and still lets a policy see the
+        commanded open/close state.
+        """
+        return dict.fromkeys(_BIMANUAL_UI_ACTION_KEYS, float)
 
     @property
     def _cameras_ft(self) -> dict[str, tuple]:
@@ -99,7 +127,10 @@ class CRPArmDual(Robot):
 
     @cached_property
     def action_features(self) -> dict[str, type]:
-        return {**self._joints_ft, **self._ui_ft}
+        return {
+            **dict.fromkeys(_BIMANUAL_GP_KEYS, float),
+            **dict.fromkeys(_BIMANUAL_UI_ACTION_KEYS, float),
+        }
 
     @property
     def is_connected(self) -> bool:
@@ -193,7 +224,59 @@ class CRPArmDual(Robot):
         self.configure()
         if self.config.init_gj_on_connect:
             self.seed_gj_registers_from_current_pose()
+        if self.config.init_gp_on_connect:
+            self.seed_gp_registers_from_current_tcp()
         logger.info("%s connected.", self)
+
+    def seed_gp_registers_from_current_tcp(self) -> tuple[bool, bool]:
+        """Write the current TCP into GP10/GP20 as a full group, so GP writes take effect.
+
+        The controller consumes GP as a group and does not act on a partially written
+        one: a lone ``set_GPs`` point is accepted, returns true, and produces no
+        motion. That failure is silent and reads exactly like a teach program that was
+        never started, so seeding is done once at connect rather than left to callers.
+
+        Seeding with the pose the arm is *already* at means this cannot move anything
+        -- it only makes the register live. This mirrors ``lock_gps_to_current_tcp``
+        on the teleop path.
+        """
+        if not self.is_connected:
+            raise DeviceNotConnectedError(f"{self} is not connected.")
+
+        gs = max(1, int(self.config.gp_trajectory_group_size))
+        results: list[bool] = []
+        for label, register, read_tcp, send in (
+            ("left", self.config.gp_register_left, self.read_end_pose_first, self.send_GPs_first),
+            (
+                "right",
+                self.config.gp_register_right,
+                self.read_end_pose_second,
+                self.send_GPs_second,
+            ),
+        ):
+            try:
+                tcp = [float(v) for v in read_tcp()]
+            except Exception as exc:
+                logger.warning("%s GP seed: TCP read failed for %s (%s)", self, label, exc)
+                results.append(False)
+                continue
+            ok = bool(send(int(register), [list(tcp) for _ in range(gs)]))
+            if not ok:
+                logger.warning(
+                    "%s GP seed: set_GPs(GP%s) rejected for %s at (%.0f, %.0f, %.0f)",
+                    self, register, label, tcp[0], tcp[1], tcp[2],
+                )
+            results.append(ok)
+
+        logger.info(
+            "%s GP seed on connect: left GP%s ok=%s | right GP%s ok=%s",
+            self,
+            self.config.gp_register_left,
+            results[0],
+            self.config.gp_register_right,
+            results[1],
+        )
+        return results[0], results[1]
 
     def seed_gj_registers_from_current_pose(
         self, *, seed_left: bool = True, seed_right: bool = True
@@ -359,6 +442,7 @@ class CRPArmDual(Robot):
             raise DeviceNotConnectedError(f"{self} is not connected.")
 
         obs_dict = self.read_crp_joints()
+        obs_dict.update({f"{arm}_ui50": v for arm, v in self._last_ui50.items()})
         n_retries = max(0, int(self.config.camera_read_retries))
         for cam_key, cam in self.cameras.items():
             start = time.perf_counter()
@@ -401,9 +485,60 @@ class CRPArmDual(Robot):
         return True
 
     def send_action(self, action: dict[str, Any]) -> dict[str, Any]:
-        raise NotImplementedError(
-            "Use send_GPs_first / send_GPs_second, not movej via send_action."
-        )
+        """Write one cartesian GP point and one gripper command per arm.
+
+        Called once per frame by ``record/loop.py``. Deliberately *not* a movej: the
+        teach-pendant program consumes GP registers, and issuing motion through a
+        different mechanism would fight it.
+
+        Both arms' GP writes share one SDK lock acquisition so a UI poll cannot land
+        between them and split the pair across controller cycles -- the same reason
+        ``send_gp_tick`` exists for teleop.
+
+        Missing keys are an error rather than a hold-last-value: a partially
+        populated action means the caller and ``action_features`` disagree, and
+        silently freezing one arm mid-episode corrupts the recording invisibly.
+        """
+        if not self.is_connected:
+            raise DeviceNotConnectedError(f"{self} is not connected.")
+
+        missing = [k for k in (*_BIMANUAL_GP_KEYS, *_BIMANUAL_UI_ACTION_KEYS) if k not in action]
+        if missing:
+            raise ValueError(
+                f"{self} send_action missing {len(missing)} key(s): {missing[:6]}"
+                f"{'...' if len(missing) > 6 else ''}"
+            )
+
+        poses = {
+            arm: [float(action[f"{arm}_{axis}.pos"]) for axis in _GP_COMPONENTS]
+            for arm in ("left", "right")
+        }
+
+        with self._sdk_lock:
+            crp = self.crp_arm_robot
+            ok_left = bool(crp.set_GPs(self.config.gp_register_left, [poses["left"]]))
+            ok_right = bool(crp.set_GPs_second(self.config.gp_register_right, [poses["right"]]))
+
+        for label, ok, pose in (("left", ok_left, poses["left"]), ("right", ok_right, poses["right"])):
+            if not ok:
+                # Accepted-vs-executed is not observable here; a rejection is the one
+                # failure the SDK does report, so do not let it pass silently.
+                logger.warning(
+                    "%s GP rejected (controller / IK); %s pose=%.1f,%.1f,%.1f",
+                    self, label, pose[0], pose[1], pose[2],
+                )
+
+        sent: dict[str, Any] = {
+            f"{arm}_{axis}.pos": poses[arm][i]
+            for arm in ("left", "right")
+            for i, axis in enumerate(_GP_COMPONENTS)
+        }
+        for arm, target in (("left", "first"), ("right", "second")):
+            ui50 = int(round(float(action[f"{arm}_ui50"])))
+            self._set_ui(target, GRIPPER_UI_OPEN, ui50)
+            self._last_ui50[arm] = float(ui50)
+            sent[f"{arm}_ui50"] = float(ui50)
+        return sent
 
     def read_end_pose_first(self) -> list[float]:
         if not self.is_connected:
@@ -481,7 +616,15 @@ class CRPArmDual(Robot):
         left: Any | None,
         right: Any | None,
     ) -> tuple[bool | None, bool | None]:
-        """Send one GP point per arm under a single SDK lock (avoids UI poll races)."""
+        """Send one GP point per arm under a single SDK lock (avoids UI poll races).
+
+        A 20 ms gap between the two writes was tried here, copying the CRP fork's
+        ``_GJ_DUAL_ARM_GAP_S`` ("controller processes one GJ bank at a time"). It made
+        no difference, and the reason it cannot be the problem is that sending *only*
+        the right arm -- primed, constant target, five seconds, every register from
+        GP1 to GP40 -- also produced no motion, while the identical code shape moved
+        the left arm 25 mm every time. Bank contention would not survive that test.
+        """
         with self._sdk_lock:
             crp = self.crp_arm_robot
             if not crp.is_connected():
