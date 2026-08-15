@@ -121,10 +121,22 @@ class RightArmGPConfig(ArmGPConfig):
     """Right arm defaults (``gp_index=20`` survives partial ``--right.*`` CLI overrides)."""
 
     gp_index: int = 20
-    # Inherited from the CRP fork, which capped the right arm an order of magnitude
-    # tighter than the left (2°/1° vs 12°/12°) without recording why. Kept as-is until
-    # the asymmetry is explained on hardware — do not relax it by analogy with the left.
+    # A sixth of the left arm's cap, inherited from the CRP fork with no recorded
+    # reason. Raising it to 7.5 (matching the left arm) does remove the lag that is
+    # otherwise felt in the wrist, but the right controller then faults with "J6 axis
+    # joint speed exceeds the maximum 250" -- so the fork's asymmetry was buying
+    # something after all, even if it never wrote down what.
+    #
+    # Why the same number is safe on the left and not on the right is still unknown.
+    # The commanded rate is identical and well under the limit (7.5 deg per 62.5 ms =
+    # 120 deg/s); what differs is that MoveL with T=0 takes its duration from the
+    # translation, so the instantaneous rate explodes on frames that rotate while
+    # barely moving -- and the right arm is the one doing the fine, near-stationary
+    # alignment in this task. Pinning the segment duration in the teach program
+    # (T=0.0625 instead of T=0) would fix it at the source and let this go to 7.5.
     wrist_roll_max_step_deg: float = 1.25
+    # Not in force: wrist_flex_sign defaults to 0.0, which disables flex mapping
+    # entirely. Left at the fork's value until flex is actually turned on.
     wrist_flex_max_step_deg: float | None = 0.625
 
 

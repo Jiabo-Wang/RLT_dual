@@ -73,6 +73,24 @@ class CRPArmDualConfig(RobotConfig):
     # explicitly there and verify on hardware before trusting it.
     init_gp_on_connect: bool = False
     gp_trajectory_group_size: int = 5
+    # Largest translation ``send_action`` will command in one call, in mm.
+    #
+    # A GP target is an absolute pose, so a caller that hands over something far from
+    # where the arm currently is gets a full-speed move across the workspace. Teleop
+    # and the recording action mapper each cap their own output, but a policy writes
+    # straight to ``send_action`` with nothing in between -- deployment was the one
+    # path with no limit at all. Capping here covers every caller, including replay.
+    #
+    # Matches the teleop default (``gp_position_step_mm``). Raise it only after
+    # measuring what the arm can actually track in one control period; 0 disables the
+    # cap and should be reserved for bench work with the workspace clear.
+    max_gp_step_mm: float = 50.0
     cameras: dict[str, CameraConfig] = field(default_factory=dict)
     # Retries after transient ``cam.read()`` failures (same idea as ``crp_arm``).
     camera_read_retries: int = 2
+    # Retries after a transient joint read failure ("getCurrentJoint failed for second
+    # robot"). The controller refuses the occasional read while it is busy servicing a
+    # motion command, and without a retry that single refusal propagates out of
+    # get_observation() and aborts the whole episode -- losing every frame recorded so
+    # far. Costs nothing on the normal path; a retry only happens after a failure.
+    joint_read_retries: int = 3

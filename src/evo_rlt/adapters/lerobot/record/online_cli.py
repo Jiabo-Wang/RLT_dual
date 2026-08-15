@@ -167,8 +167,6 @@ def build_online_train_argv(args: argparse.Namespace, setup, paths, cal_dir: str
         f"--online_rl.time_decay={args.time_decay}",
         f"--online_rl.save_dir={args.save_dir}",
         f"--online_rl.save_every_episodes={args.save_every_episodes}",
-        f"--online_rl.go_home_time_s={args.go_home_time_s}",
-        f"--online_rl.go_home_gripper_value={args.go_home_gripper_value}",
         f"--online_rl.wandb={'true' if args.wandb else 'false'}",
         f"--online_rl.wandb_project={args.wandb_project}",
     ]
@@ -178,8 +176,6 @@ def build_online_train_argv(args: argparse.Namespace, setup, paths, cal_dir: str
         argv.append(f"--policy.actor_slew_rate_limit={args.actor_slew_rate_limit}")
     if args.offline_cache_path is not None:
         argv.append(f"--online_rl.offline_cache_path={args.offline_cache_path}")
-    if args.go_home_positions is not None:
-        argv.append(f"--online_rl.go_home_positions={args.go_home_positions}")
     if args.wandb_entity is not None:
         argv.append(f"--online_rl.wandb_entity={args.wandb_entity}")
     if args.wandb_run_name is not None:
@@ -250,14 +246,9 @@ def print_online_train_summary(args: argparse.Namespace, paths) -> None:
         f"{args.teleop_toggle_key}=both-arm intervention/release"
     )
     print(
-        f"Go-home: {args.go_home_time_s}s ramp to the calibrated middle position "
-        f"(gripper -> {args.go_home_gripper_value}, verify this means 'open' for your "
-        "hardware) after each episode, before the reset window. 0 = disabled."
-    )
-    print(
         f"Reset window: {args.reset_time_s}s pure teleop after every episode "
         "(success or failure) before the next one starts -- use it to physically "
-        "reposition task objects (go-home does not move them)."
+        "reposition task objects."
     )
     if args.wandb:
         print(
@@ -656,34 +647,6 @@ def build_parser() -> argparse.ArgumentParser:
         "new folder -- pass the same --save-dir the original run used.",
     )
     parser.add_argument("--save-every-episodes", type=int, default=5)
-    parser.add_argument(
-        "--go-home-time-s", type=float, default=3.0,
-        help="After each episode ends (s/f), ramp the follower back to the calibrated "
-        "middle position (all non-gripper joints = 0 degrees) over this many seconds, "
-        "before the teleop reset window. 0 disables this step.",
-    )
-    parser.add_argument(
-        "--go-home-gripper-value", type=float, default=100.0,
-        help="Gripper target (0-100) during go-home. VERIFY which end means 'open' for "
-        "your specific hardware (mounting-dependent) before relying on this.",
-    )
-    parser.add_argument(
-        "--go-home-positions",
-        default=(
-            '{"left_shoulder_pan.pos": 2038, "left_shoulder_lift.pos": 2081, '
-            '"left_elbow_flex.pos": 3034, "left_wrist_flex.pos": 1142, "left_gripper.pos": 2164, '
-            '"right_shoulder_pan.pos": 2066, "right_shoulder_lift.pos": 2160, '
-            '"right_elbow_flex.pos": 2880, "right_wrist_flex.pos": 1066, "right_gripper.pos": 2209}'
-        ),
-        help="Per-joint go-home targets as raw motor ticks, as a JSON object -- paste the "
-        "POS column straight from lerobot-calibrate's \"recording positions\" screen, no "
-        "manual conversion needed. Defaults to this rig's own calibrated reset pose (the "
-        "one recorded in README_online.md) -- NOT portable to a different physical robot "
-        "or a re-calibration; pass --go-home-positions explicitly to override, or "
-        '--go-home-positions "{}" to fall back to the calibrated midpoint (0 degrees) for '
-        "every joint. Joints not listed fall back to the calibrated midpoint; gripper "
-        "joints listed here override --go-home-gripper-value.",
-    )
     parser.add_argument(
         "--resume-from", default=None,
         help="Explicit path to a complete online_state.pt snapshot from a previous run "

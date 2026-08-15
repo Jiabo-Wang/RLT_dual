@@ -390,27 +390,6 @@ class OnlineRLConfig:
     # fields when resuming if the metrics must continue on the same run.
     wandb_run_id: str | None = None
     wandb_resume: str | None = None
-    # After each recorded episode ends (s/f pressed), before the teleop reset
-    # window, smoothly ramp the follower back to the calibrated middle
-    # position (all non-gripper joints = 0 degrees -- exactly the pose set by
-    # hand during lerobot-calibrate's homing step) over this many seconds.
-    # 0 disables this step (robot stays wherever the episode left it).
-    go_home_time_s: float = 3.0
-    # Gripper target during go-home (0-100 range, no "middle" concept for an
-    # open/close range). VERIFY which end means "open" for your specific
-    # hardware (mounting-dependent, not fixed by lerobot) before relying on
-    # this -- sending the wrong direction closes the gripper instead of
-    # opening it.
-    go_home_gripper_value: float = 100.0
-    # Per-joint go-home targets as RAW motor ticks -- i.e. paste the POS
-    # column straight from lerobot-calibrate's "recording positions" screen,
-    # no manual conversion needed. Keyed by action-feature name, e.g.
-    # "shoulder_pan.pos" (single arm) or "left_shoulder_pan.pos" /
-    # "right_shoulder_pan.pos" (bimanual). Any joint not listed here (e.g.
-    # wrist_roll, which lerobot-calibrate excludes from ROM recording) falls
-    # back to the calibrated-midpoint default (0 degrees), same as before.
-    # Overrides go_home_gripper_value for any gripper joint it lists.
-    go_home_positions: dict[str, float] | None = None
 
 
 @dataclass
@@ -675,10 +654,6 @@ class RecordConfig:
                 raise ValueError("`policy.actor_update_interval` must be > 0.")
             if self.policy.actor_action_clip_delta is not None and self.policy.actor_action_clip_delta < 0:
                 raise ValueError("`policy.actor_action_clip_delta` must be >= 0 when set.")
-            if self.online_rl.go_home_time_s < 0:
-                raise ValueError("`online_rl.go_home_time_s` must be >= 0.")
-            if not (0 <= self.online_rl.go_home_gripper_value <= 100):
-                raise ValueError("`online_rl.go_home_gripper_value` must be in [0, 100].")
 
     @classmethod
     def __get_path_fields__(cls) -> list[str]:
@@ -835,22 +810,46 @@ def _validate_actor_rl_arm_action_order(robot, policy_cfg) -> None:
         )
 
 
-def _raw_ticks_to_normalized(robot, action_name: str, raw_value: float) -> float:
-    """Convert a raw motor tick (the POS column from lerobot-calibrate) to
-    the normalized [-100, 100] value robot.send_action() expects, using that
-    motor's own recorded range_min/range_max/drive_mode -- mirrors
-    MotorsBus._normalize()."""
-    motor_name = action_name.removesuffix(".pos")
-    arm = robot
-    for prefix, attr in (("left_", "left_arm"), ("right_", "right_arm")):
-        if motor_name.startswith(prefix) and hasattr(robot, attr):
-            arm = getattr(robot, attr)
-            motor_name = motor_name[len(prefix) :]
-            break
-    cal = arm.bus.calibration[motor_name]
-    bounded = min(cal.range_max, max(cal.range_min, raw_value))
-    norm = ((bounded - cal.range_min) / (cal.range_max - cal.range_min)) * 200 - 100
-    return -norm if cal.drive_mode else norm
+def _crp_wait_for_teach_start(robot) -> None:
+    """Give the operator a window to start the CRP teach programs, after connect.
+
+    ``robot.connect()`` switches work mode and powers the servos, and that stops a
+    teach program that was already running -- so pressing green START *before*
+    launching a recording does not survive into the run. Teleop covers this with a
+    countdown before GP align; the recording path went straight from connect into
+    episode 1, which left the arms with nobody consuming their GP registers and
+    looked exactly like the recording silently not moving the robot.
+    """
+    if type(robot).__name__ != "CRPArmDual":
+        return
+
+    from evo_rlt.adapters.crp.teleop_config import TeleoperateDualCRPConfig
+    from evo_rlt.adapters.crp.teleop_loop import wait_before_gp_align
+
+    wait_before_gp_align(delay_s=TeleoperateDualCRPConfig().gp_align_delay_s)
+
+
+def _crp_action_processor(robot):
+    """Leader-joints -> CRP-GP stage for ``record_loop``, or None for other robots.
+
+    ``record_loop`` hands the teleoperator's action straight to
+    ``robot.send_action``. That works when leader and follower speak the same joint
+    names; a CRP follower instead consumes a cartesian GP pose, which the leader's
+    joints only become after SO101 forward kinematics plus the leader-to-CRP frame
+    alignment. Without this stage every recorded frame reaches ``send_action`` with
+    all fourteen GP keys missing.
+
+    Only the default identity pipeline is replaced, and only for CRP, so every other
+    robot keeps the path it had. The import is local because it pulls in the CRP
+    adapter, which is optional and not installable everywhere.
+    """
+    if type(robot).__name__ != "CRPArmDual":
+        return None
+
+    from evo_rlt.adapters.crp.record_action import CrpLeaderActionToGp
+
+    logging.info("CRP follower: installing leader-joints -> GP action mapper.")
+    return CrpLeaderActionToGp(robot)
 
 
 @parser.wrap()
@@ -875,6 +874,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
     teleop = make_teleoperator_from_config(cfg.teleop) if cfg.teleop is not None else None
 
     teleop_action_processor, robot_action_processor, robot_observation_processor = make_default_processors()
+    robot_action_processor = _crp_action_processor(robot) or robot_action_processor
 
     dataset_features = combine_feature_dicts(
         aggregate_pipeline_dataset_features(
@@ -998,6 +998,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
         robot.connect()
         if teleop is not None:
             teleop.connect()
+        _crp_wait_for_teach_start(robot)
         on_record_connected = getattr(cfg, "_on_record_connected", None)
         if callable(on_record_connected):
             on_record_connected(robot, teleop)
@@ -1055,19 +1056,30 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
         # unbind s/f so the user cannot accidentally end an episode out of
         # the r/u outcome state machine.
         bind_ep_outcome_keys = cfg.enable_episode_outcome_labeling and not teleop_r_key_mode
+        # While a policy is driving, the failure key stays unbound: an episode that went
+        # wrong is re-recorded with the left arrow rather than labelled. Success (s) and
+        # the arrows still work, so nothing else about ending an episode changes.
+        #
+        # This does remove the only way to *label* a failure, which the online RL warmup
+        # counts (OnlineRLConfig.min_warmup_failures). A run that needs failures has to
+        # get them another way, or that threshold has to come down; otherwise warmup
+        # never completes.
+        bind_failure_key = policy is None
         listener, events = init_keyboard_listener(
             intervention_toggle_key=cfg.intervention_toggle_key if policy is not None else None,
             left_intervention_key=cfg.left_intervention_key if rlt_hil_mode else None,
             right_intervention_key=cfg.right_intervention_key if rlt_hil_mode else None,
             critical_phase_toggle_key=cp_key if not rlt_active else None,
             episode_success_key=cfg.episode_success_key if bind_ep_outcome_keys else None,
-            episode_failure_key=cfg.episode_failure_key if bind_ep_outcome_keys else None,
+            episode_failure_key=(
+                cfg.episode_failure_key if bind_ep_outcome_keys and bind_failure_key else None
+            ),
             cp_success_key="s" if cfg.enable_critical_phase_labeling and not rlt_active else None,
             cp_failure_key="f" if cfg.enable_critical_phase_labeling and not rlt_active else None,
             rl_phase_key=rl_phase_key_binding,
             rl_phase_failure_key=rl_phase_failure_key_binding,
             end_success_key=cfg.rlt.end_success_key if rlt_active else None,
-            end_failure_key=cfg.rlt.end_failure_key if rlt_active else None,
+            end_failure_key=cfg.rlt.end_failure_key if rlt_active and bind_failure_key else None,
             milestone_key=cfg.rlt.milestone_key if rlt_active else None,
         )
 
@@ -1219,49 +1231,6 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                 and not teleop_r_key_mode
                 and (next_episode_needed or events["rerecord_episode"])
             )
-
-        def _run_go_home_if_needed() -> None:
-            """After the recorded episode ends (s/f pressed), before the
-            teleop reset window, smoothly ramp the follower back to the
-            go-home position (see OnlineRLConfig.go_home_positions /
-            go_home_time_s). Joints not listed in go_home_positions fall back
-            to the calibrated middle position (0 degrees), except the
-            gripper which defaults to go_home_gripper_value. Only resets the
-            robot's OWN joint configuration -- it can't move external task
-            objects, which is what the teleop reset window (if any) is
-            still for."""
-            if not cfg.online_rl.enable or cfg.online_rl.go_home_time_s <= 0:
-                return
-            try:
-                import time as _time
-
-                from lerobot.utils.robot_utils import precise_sleep
-
-                start_action = robot.get_observation()
-                action_names = list(robot.action_features.keys())
-                raw_targets = cfg.online_rl.go_home_positions or {}
-                home_action = {
-                    name: (
-                        _raw_ticks_to_normalized(robot, name, raw_targets[name])
-                        if name in raw_targets
-                        else cfg.online_rl.go_home_gripper_value
-                        if name.endswith("gripper.pos")
-                        else 0.0
-                    )
-                    for name in action_names
-                }
-                steps = max(1, round(cfg.online_rl.go_home_time_s * cfg.dataset.fps))
-                for i in range(1, steps + 1):
-                    step_t = _time.perf_counter()
-                    alpha = i / steps
-                    blended = {
-                        name: start_action[name] + (home_action[name] - start_action[name]) * alpha
-                        for name in action_names
-                    }
-                    robot.send_action(blended)
-                    precise_sleep(max(1 / cfg.dataset.fps - (_time.perf_counter() - step_t), 0.0))
-            except Exception:
-                logging.exception("Go-home ramp failed; leaving robot where the episode left it.")
 
         def _run_reset_loop_if_needed(recorded_episodes: int) -> None:
             if not _should_run_reset_loop(recorded_episodes):
@@ -1418,7 +1387,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                 _run_online_rl_update(recorded_episodes, buffer_total_added_before)
                 # Safety net: a gradient update (and the warmup-satisfied
                 # transition, if this was the episode that crossed it) has
-                # already happened in memory at this point, but go-home and
+                # already happened in memory at this point, but the
                 # the reset window below are real robot motion that can take
                 # 15-20+ seconds and are exactly where a hardware fault (e.g.
                 # a motor bus voltage error) can kill the process -- without
@@ -1427,7 +1396,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                 # re-doing warmup satisfaction and this update's work.
                 # completed_episodes uses +1 (not the actual, possibly-
                 # rerecorded final count from _finish_recorded_episode below,
-                # which needs go-home/reset to have already happened) so a
+                # which needs the reset window to have already happened) so a
                 # resume from *this* save starts the next new episode at an
                 # id that doesn't collide with the one just flushed into the
                 # buffer above -- the trade-off is that a rerecord after this
@@ -1436,7 +1405,6 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                 # which harmlessly just gets overwritten by that later save
                 # in the common (non-crash) case.
                 _save_online_rl_latest_state(recorded_episodes + 1)
-                _run_go_home_if_needed()
                 _run_reset_loop_if_needed(recorded_episodes)
                 recorded_episodes = _finish_recorded_episode(recorded_episodes, episode_success)
                 _save_online_rl_latest_state(recorded_episodes)

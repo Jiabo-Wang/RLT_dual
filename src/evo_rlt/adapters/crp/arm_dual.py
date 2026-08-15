@@ -27,6 +27,7 @@ Gripper: UI50 open; UI51–54 motion limits; avoid reading UI56–58 from Python
 """
 
 import logging
+import math
 import threading
 import time
 from functools import cached_property
@@ -92,8 +93,16 @@ class CRPArmDual(Robot):
         self.crp_arm_robot = CrpRobotPy()
         self._second_connected = False
         self._sdk_lock = threading.Lock()
-        # Last ui50 written per arm; surfaced in the observation (see _ui_ft).
-        self._last_ui50: dict[str, float] = {"left": 0.0, "right": 0.0}
+        # Last ui50 actually written per arm; surfaced in the observation (see _ui_ft).
+        # None means "never written", which forces the first send_action to issue the
+        # write even when the commanded value happens to be 0 -- the gripper's opening
+        # at power-on is not known to us, so 0 cannot be assumed as the starting point.
+        self._last_ui50: dict[str, float | None] = {"left": None, "right": None}
+        # Last GP pose commanded per arm; the reference _cap_gp_step clamps against.
+        self._last_gp_sent: dict[str, list[float] | None] = {"left": None, "right": None}
+        # How often a joint read had to be retried; reported once at disconnect so a
+        # controller that is merely flaky is distinguishable from one that is failing.
+        self._joint_read_retry_count = 0
         self.cameras = make_cameras_from_configs(config.cameras)
 
     @property
@@ -388,9 +397,27 @@ class CRPArmDual(Robot):
             raise NotImplementedError(
                 "read_joints_second missing; rebuild from ~/python_C++/CrpRobotPy"
             )
-        with self._sdk_lock:
-            left = self.crp_arm_robot.read_joints()
-            right = self.crp_arm_robot.read_joints_second()
+        n_retries = max(0, int(self.config.joint_read_retries))
+        for attempt in range(n_retries + 1):
+            try:
+                with self._sdk_lock:
+                    left = self.crp_arm_robot.read_joints()
+                    right = self.crp_arm_robot.read_joints_second()
+                break
+            except RuntimeError as exc:
+                # Both arms are re-read on retry rather than just the one that failed:
+                # the pair has to come from the same instant to be a usable state.
+                if attempt >= n_retries:
+                    raise RuntimeError(
+                        f"{self} joint read failed {n_retries + 1}x in a row ({exc}). "
+                        "The controller is refusing reads, not just busy."
+                    ) from exc
+                self._joint_read_retry_count += 1
+                logger.warning(
+                    "%s joint read failed (%s/%s): %s; retrying",
+                    self, attempt + 1, n_retries + 1, exc,
+                )
+                time.sleep(0.005)
         if isinstance(right, list):
             right = {f"j{i + 1}": float(v) for i, v in enumerate(right)}
         out: dict[str, float] = {}
@@ -425,6 +452,11 @@ class CRPArmDual(Robot):
             except Exception as exc:
                 logger.warning("camera disconnect: %s", exc)
 
+        if self._joint_read_retry_count:
+            logger.info(
+                "%s joint reads retried %d time(s) this session.",
+                self, self._joint_read_retry_count,
+            )
         logger.info("%s disconnected.", self)
 
     @property
@@ -442,7 +474,9 @@ class CRPArmDual(Robot):
             raise DeviceNotConnectedError(f"{self} is not connected.")
 
         obs_dict = self.read_crp_joints()
-        obs_dict.update({f"{arm}_ui50": v for arm, v in self._last_ui50.items()})
+        obs_dict.update(
+            {f"{arm}_ui50": (0.0 if v is None else v) for arm, v in self._last_ui50.items()}
+        )
         n_retries = max(0, int(self.config.camera_read_retries))
         for cam_key, cam in self.cameras.items():
             start = time.perf_counter()
@@ -484,6 +518,49 @@ class CRPArmDual(Robot):
             self.crp_arm_robot.movej([float(v) for v in joints])
         return True
 
+    def _cap_gp_step(self, label: str, target: list[float]) -> list[float]:
+        """Clamp one arm's commanded translation to ``max_gp_step_mm`` per call.
+
+        The reference is the previous commanded pose, seeded on the first call from
+        the arm's measured TCP so an opening command cannot jump either. Orientation
+        passes through: a rotation cannot fling the arm across the cell the way a
+        position step can, and teleop's own cap (``gp_position_step``) is likewise
+        translation-only, so this keeps the two paths behaving the same.
+
+        Clamping rather than rejecting is deliberate: a policy that briefly asks for
+        something far away should be dragged toward it at a bounded rate, not have the
+        arm freeze mid-episode.
+        """
+        cap = float(self.config.max_gp_step_mm)
+        if cap <= 0:
+            return target
+
+        prev = self._last_gp_sent.get(label)
+        if prev is None:
+            try:
+                reader = self.read_end_pose_first if label == "left" else self.read_end_pose_second
+                prev = reader()
+            except Exception as exc:
+                # No reference to clamp against; take the target and let the next call
+                # be bounded rather than blocking the episode on a transient read.
+                logger.warning("%s [%s] GP cap: TCP read failed (%s); first target uncapped", self, label, exc)
+                self._last_gp_sent[label] = list(target)
+                return target
+
+        dist = math.dist(prev[:3], target[:3])
+        if dist <= cap:
+            out = list(target)
+        else:
+            scale = cap / dist
+            out = [prev[i] + (target[i] - prev[i]) * scale for i in range(3)] + list(target[3:])
+            logger.warning(
+                "%s [%s] GP step %.0f mm exceeds max_gp_step_mm=%.0f; advancing toward "
+                "(%.0f, %.0f, %.0f) instead of jumping to (%.0f, %.0f, %.0f)",
+                self, label, dist, cap, out[0], out[1], out[2], target[0], target[1], target[2],
+            )
+        self._last_gp_sent[label] = out
+        return out
+
     def send_action(self, action: dict[str, Any]) -> dict[str, Any]:
         """Write one cartesian GP point and one gripper command per arm.
 
@@ -510,7 +587,9 @@ class CRPArmDual(Robot):
             )
 
         poses = {
-            arm: [float(action[f"{arm}_{axis}.pos"]) for axis in _GP_COMPONENTS]
+            arm: self._cap_gp_step(
+                arm, [float(action[f"{arm}_{axis}.pos"]) for axis in _GP_COMPONENTS]
+            )
             for arm in ("left", "right")
         }
 
@@ -533,10 +612,21 @@ class CRPArmDual(Robot):
             for arm in ("left", "right")
             for i, axis in enumerate(_GP_COMPONENTS)
         }
+        # Only write UI50 when the commanded opening actually changed. Each _set_ui is
+        # its own blocking SDK round trip and, unlike the GP pair above, the two do not
+        # share a controller communication window -- writing both every frame cost
+        # ~137 ms on top of the 46 ms GP write and pinned recording at 5 Hz against a
+        # configured 16. A gripper is idle for most of an episode, so this is nearly
+        # always free. Teleop has always gated the same way (_gripper_pos_changed);
+        # only this path was missing it.
+        # The returned value is the commanded one either way: a skipped write means the
+        # controller is already at that opening, so the action is still what was sent.
         for arm, target in (("left", "first"), ("right", "second")):
             ui50 = int(round(float(action[f"{arm}_ui50"])))
-            self._set_ui(target, GRIPPER_UI_OPEN, ui50)
-            self._last_ui50[arm] = float(ui50)
+            last = self._last_ui50[arm]
+            if last is None or ui50 != int(last):
+                self._set_ui(target, GRIPPER_UI_OPEN, ui50)
+                self._last_ui50[arm] = float(ui50)
             sent[f"{arm}_ui50"] = float(ui50)
         return sent
 

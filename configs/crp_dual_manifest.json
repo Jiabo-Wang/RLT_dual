@@ -1,7 +1,7 @@
 {
   "robot_id": "crp_dual",
   "datasets": {
-    "root": "~/lerobot_data/crp_dual",
+    "root": "~/intern/RLT_dual/data/crp_dual",
     "fps": 16
   },
   "arms": [
@@ -49,7 +49,7 @@
     {
       "alias": "left_wrist",
       "port": {
-        "serial": "235123073792"
+        "serial": "235123075818"
       },
       "model": "RealSense D405",
       "width": 640,
@@ -60,7 +60,7 @@
     {
       "alias": "right_wrist",
       "port": {
-        "serial": "235123075818"
+        "serial": "235123073792"
       },
       "model": "RealSense D405",
       "width": 640,

@@ -69,7 +69,24 @@ def robot(monkeypatch):
     monkeypatch.setattr(ad, "ensure_crp_sdk_loaded", lambda: None)
     from evo_rlt.adapters.crp.config_arm_dual import CRPArmDualConfig
 
-    r = ad.CRPArmDual(CRPArmDualConfig(id="test"))
+    # max_gp_step_mm=0 disables the translation cap. These tests check which value
+    # lands in which register, using poses picked for legibility rather than for
+    # being near the fake TCP; the cap itself is covered by test_step_cap_* below.
+    r = ad.CRPArmDual(CRPArmDualConfig(id="test", max_gp_step_mm=0.0))
+    r._second_connected = True
+    return r
+
+
+@pytest.fixture
+def capped_robot(monkeypatch):
+    """Same fake session, but with the default translation cap in force."""
+    monkeypatch.setitem(sys.modules, "CrpRobotPy", types.SimpleNamespace(CrpRobotPy=_FakeCrp))
+    from evo_rlt.adapters.crp import arm_dual as ad
+
+    monkeypatch.setattr(ad, "ensure_crp_sdk_loaded", lambda: None)
+    from evo_rlt.adapters.crp.config_arm_dual import CRPArmDualConfig
+
+    r = ad.CRPArmDual(CRPArmDualConfig(id="test", max_gp_step_mm=50.0))
     r._second_connected = True
     return r
 
@@ -201,3 +218,38 @@ class TestGpSeed:
 
         assert (ok_left, ok_right) == (False, False)
         assert "GP seed" in caplog.text
+
+
+def test_step_cap_clamps_a_far_target_toward_it(capped_robot):
+    """A pose far from the arm advances by at most max_gp_step_mm per call."""
+    import math
+
+    # The fake left TCP is (494, 104, 298); ask for something ~500 mm away.
+    far = _action(**{"left_x.pos": 994.0, "left_y.pos": 104.0, "left_z.pos": 298.0})
+    sent = capped_robot.send_action(far)
+    moved = math.dist((494.0, 104.0, 298.0),
+                      (sent["left_x.pos"], sent["left_y.pos"], sent["left_z.pos"]))
+    assert moved == pytest.approx(50.0, abs=1e-6)
+    assert sent["left_x.pos"] == pytest.approx(544.0, abs=1e-6)
+
+
+def test_step_cap_advances_on_each_call(capped_robot):
+    """Repeated far requests keep advancing instead of freezing the arm."""
+    far = _action(**{"left_x.pos": 994.0, "left_y.pos": 104.0, "left_z.pos": 298.0})
+    xs = [capped_robot.send_action(far)["left_x.pos"] for _ in range(3)]
+    assert xs == pytest.approx([544.0, 594.0, 644.0], abs=1e-6)
+
+
+def test_step_cap_leaves_a_near_target_untouched(capped_robot):
+    """Movement within the cap passes through byte for byte."""
+    near = _action(**{"left_x.pos": 504.0, "left_y.pos": 104.0, "left_z.pos": 298.0})
+    sent = capped_robot.send_action(near)
+    assert sent["left_x.pos"] == pytest.approx(504.0, abs=1e-9)
+
+
+def test_step_cap_does_not_touch_orientation(capped_robot):
+    """Only translation is capped; roll/pitch/yaw pass through."""
+    far = _action(**{"left_x.pos": 994.0, "left_roll.pos": 175.0,
+                     "left_pitch.pos": -12.0, "left_yaw.pos": 88.0})
+    sent = capped_robot.send_action(far)
+    assert (sent["left_roll.pos"], sent["left_pitch.pos"], sent["left_yaw.pos"]) == (175.0, -12.0, 88.0)

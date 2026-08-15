@@ -299,6 +299,43 @@ def lock_gps_to_current_tcp(
         )
 
 
+# J6 this far from zero when the teach program starts risks the controller's MoveL
+# picking a different IK branch than the arm is currently in.
+WRIST_HOME_TOLERANCE_DEG = 5.0
+
+
+def warn_if_wrist_not_homed(robot: CRPArmDual) -> None:
+    """Warn when an arm's J6 is away from zero before the teach program is started.
+
+    ``MoveL`` takes a cartesian pose and solves IK itself, and a 6-axis arm reaches
+    the same pose with more than one joint configuration. Starting the teach program
+    with J6 already turned lets the controller settle on a different branch than the
+    arm is actually in, and its first move is a full-speed swing of J6 to get there --
+    which faults as "J6 axis joint speed exceeds the maximum". Measured on this cell:
+    J6 at 27 deg faulted every time, J6 at 0 deg never did.
+
+    Only a warning: the arm is free to rotate J6 during teleop, and the hazard is
+    specific to the moment the program starts. Nothing here can move the arm to fix
+    it either -- that is a teach-pendant jog.
+    """
+    try:
+        joints = robot.read_crp_joints()
+    except Exception as exc:  # diagnostics only; never block the session on this
+        logger.debug("Wrist home check skipped (joint read failed: %s)", exc)
+        return
+    for label in ("left", "right"):
+        j6 = joints.get(f"{label}_j6.pos")
+        if j6 is None or abs(j6) <= WRIST_HOME_TOLERANCE_DEG:
+            continue
+        logger.warning(
+            "[%s] J6 is at %.1f deg, not near 0. Starting the teach program from here "
+            "can make MoveL solve a different IK branch and fault with 'J6 axis joint "
+            "speed exceeds the maximum'. Jog J6 back to 0 on the teach pendant first.",
+            label,
+            j6,
+        )
+
+
 def prepare_dual_gp_session(
     robot: CRPArmDual,
     cfg: TeleoperateDualCRPConfig,
@@ -318,6 +355,7 @@ def prepare_dual_gp_session(
     if robot.config.defer_servo_power_on:
         robot.ensure_servo_power_on()
 
+    warn_if_wrist_not_homed(robot)
     robot.setup_gripper_ui()
     if lock_gp:
         lock_gps_to_current_tcp(robot, cfg)
