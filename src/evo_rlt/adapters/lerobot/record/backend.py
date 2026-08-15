@@ -810,22 +810,37 @@ def _validate_actor_rl_arm_action_order(robot, policy_cfg) -> None:
         )
 
 
-def _crp_wait_for_teach_start(robot) -> None:
-    """Give the operator a window to start the CRP teach programs, after connect.
+def _crp_prepare_teach_start(robot) -> None:
+    """Point the GP registers at where the arms are, then wait for green START.
 
-    ``robot.connect()`` switches work mode and powers the servos, and that stops a
-    teach program that was already running -- so pressing green START *before*
-    launching a recording does not survive into the run. Teleop covers this with a
-    countdown before GP align; the recording path went straight from connect into
-    episode 1, which left the arms with nobody consuming their GP registers and
-    looked exactly like the recording silently not moving the robot.
+    The GP registers survive across runs: whatever pose was written last is still
+    sitting there. Start the teach program without overwriting it and the first
+    ``MoveL`` drives the arm back to wherever the *previous* session left off -- with
+    no leader input at all, which is exactly how it looks from the outside.
+
+    Teleop has always seeded them (``lock_gps_to_current_tcp``) before its countdown.
+    The recording path only got the countdown, so it kept the stale target. Seeding
+    with the pose the arm already holds means this call cannot move anything.
+
+    Ordering matters: seed first, then count down. The operator presses START during
+    the countdown, by which point the registers already hold the current pose.
     """
     if type(robot).__name__ != "CRPArmDual":
         return
 
     from evo_rlt.adapters.crp.teleop_config import TeleoperateDualCRPConfig
-    from evo_rlt.adapters.crp.teleop_loop import wait_before_gp_align
+    from evo_rlt.adapters.crp.teleop_loop import wait_before_gp_align, warn_if_wrist_not_homed
 
+    warn_if_wrist_not_homed(robot)
+    ok_left, ok_right = robot.seed_gp_registers_from_current_tcp()
+    if not (ok_left and ok_right):
+        logging.warning(
+            "CRP: GP seed rejected (left ok=%s, right ok=%s). The registers may still "
+            "hold the previous session's target -- do not press START until this is "
+            "resolved, or the arm will move to that old pose.",
+            ok_left,
+            ok_right,
+        )
     wait_before_gp_align(delay_s=TeleoperateDualCRPConfig().gp_align_delay_s)
 
 
@@ -998,7 +1013,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
         robot.connect()
         if teleop is not None:
             teleop.connect()
-        _crp_wait_for_teach_start(robot)
+        _crp_prepare_teach_start(robot)
         on_record_connected = getattr(cfg, "_on_record_connected", None)
         if callable(on_record_connected):
             on_record_connected(robot, teleop)
