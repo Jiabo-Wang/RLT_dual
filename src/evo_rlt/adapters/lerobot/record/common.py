@@ -375,6 +375,19 @@ def build_robot_argv(
             f"--robot.ip2={right['ip']}",
             f"--robot.gp_register_left={left.get('gp_index', 10)}",
             f"--robot.gp_register_right={right.get('gp_index', 20)}",
+            # Opening each gripper is driven to before the run, so the first
+            # observation carries a real value instead of the "fully closed"
+            # fallback. Per-cell, so it lives in the manifest.
+            *(
+                [f"--robot.init_gripper_ui50_left={left['gripper_init_ui50']}"]
+                if "gripper_init_ui50" in left
+                else []
+            ),
+            *(
+                [f"--robot.init_gripper_ui50_right={right['gripper_init_ui50']}"]
+                if "gripper_init_ui50" in right
+                else []
+            ),
             f"--robot.cameras={json.dumps(left_cameras)}",
         ]
 
@@ -408,8 +421,9 @@ def build_dataset_argv(
     episode_time_s: int,
     fps: int,
     vcodec: str,
+    rename_map: str | None = None,
 ) -> list[str]:
-    return [
+    argv = [
         f"--dataset.repo_id={dataset_name}",
         f"--dataset.root={dataset_root}",
         f"--dataset.single_task={task}",
@@ -421,6 +435,9 @@ def build_dataset_argv(
         f"--dataset.video_encoding_batch_size={num_episodes + 1}",
         "--dataset.streaming_encoding=true",
     ]
+    if rename_map:
+        argv.append(f"--dataset.rename_map={rename_map}")
+    return argv
 
 
 def build_policy_overrides(

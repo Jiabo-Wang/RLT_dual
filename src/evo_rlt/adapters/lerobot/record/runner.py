@@ -21,6 +21,7 @@ from evo_rlt.adapters.lerobot.record.common import (
     load_robot_setup,
     preflight_motor_connections,
     remove_existing_dataset,
+    RunPaths,
     resolve_run_paths,
     set_offline_env,
     stage_follower_calibrations,
@@ -595,6 +596,20 @@ def run_collect(args: argparse.Namespace) -> None:
         leader_cal_dir.cleanup()
 
 
+def policy_sync_argv(args: argparse.Namespace, eligible: bool) -> str:
+    """Build ``--policy_sync_to_teleop`` for the child process.
+
+    Off unless the caller opts in with ``--policy-sync-to-teleop``. Syncing means the
+    follower's action dict is written straight onto the leader's motor bus, which only
+    works when the two share a joint namespace. ``CRPArmDual`` commands a cartesian EE
+    pose (``left_x.pos`` ... ``left_yaw.pos``), so the write raises ``KeyError: 'x'`` on
+    the first frame the policy takes over. Making the leader track a cartesian target
+    needs an IK step the CRP adapter does not have yet -- ``mappers/`` is forward-only.
+    """
+    enabled = eligible and getattr(args, "policy_sync_to_teleop", False)
+    return f"--policy_sync_to_teleop={'true' if enabled else 'false'}"
+
+
 def build_default_collect_record_argv(
     args: argparse.Namespace,
     setup,
@@ -636,7 +651,7 @@ def build_default_collect_record_argv(
             getattr(args, "discard_unlabeled_episodes", False),
         ),
         "--intervention_state_machine_enabled=true",
-        f"--policy_sync_to_teleop={'true' if teleop_argv else 'false'}",
+        policy_sync_argv(args, bool(teleop_argv)),
         f"--vla_ref={'true' if args.vla_ref else 'false'}",
         f"--play_sounds={'true' if args.play_sounds else 'false'}",
     ]
@@ -757,10 +772,7 @@ def build_segment_record_argv(args, setup, paths, cal_dir: str, teleop_argv: lis
         ),
         "--enable_episode_outcome_labeling=true",
         "--intervention_state_machine_enabled=true",
-        (
-            "--policy_sync_to_teleop="
-            f"{'true' if teleop_argv and args.critical_source in {'rlt', 'vla'} else 'false'}"
-        ),
+        policy_sync_argv(args, bool(teleop_argv) and args.critical_source in {"rlt", "vla"}),
         f"--vla_ref={'true' if args.vla_ref else 'false'}",
         "--play_sounds=true",
     ]
@@ -858,9 +870,27 @@ def run_full(args: argparse.Namespace) -> None:
     # rollouts.  A teleoperation-only recording has no policy, so using that
     # prefix makes LeRobot's dataset-name sanity check reject the run.
     dataset_prefix = "record_teleop_full" if args.initial_source == "teleop" else "eval_vla_full"
-    paths = resolve_run_paths(setup.setup, args.dataset_tag, dataset_prefix)
-    configure_logging(paths.log_file, args.log_level)
-    remove_existing_dataset(paths.dataset_root)
+    resume_dir = getattr(args, "resume_dir", None)
+    if resume_dir:
+        # Reuse the directory as-is: same repo_id (LeRobot derives it from the leaf
+        # name), same root, and critically *not* removed. Skipping
+        # remove_existing_dataset is the whole point -- it is what would otherwise
+        # delete the episodes being resumed.
+        root = Path(resume_dir).expanduser().resolve()
+        if not (root / "meta" / "info.json").is_file():
+            raise ValueError(f"--resume-dir {root} is not a dataset (no meta/info.json)")
+        paths = RunPaths(
+            dataset_name=f"local/{root.name}",
+            dataset_root=root,
+            day_dir=root.parent,
+            log_file=root.parent / f"{root.name}.log",
+        )
+        configure_logging(paths.log_file, args.log_level)
+        log.info("Resuming %s (existing episodes are kept)", root)
+    else:
+        paths = resolve_run_paths(setup.setup, args.dataset_tag, dataset_prefix)
+        configure_logging(paths.log_file, args.log_level)
+        remove_existing_dataset(paths.dataset_root)
     teleop_argv = build_teleop_argv(setup.leaders, args.no_teleop, setup.teleop_id)
 
     if args.initial_source == "vla" and args.policy_path is None:
@@ -893,6 +923,7 @@ def run_full(args: argparse.Namespace) -> None:
                 episode_time_s=args.episode_time_s,
                 fps=args.fps,
                 vcodec=args.vcodec,
+                rename_map=args.rename_map,
             ),
             *build_reset_time_argv(args),
             *build_rtc_argv(
@@ -921,7 +952,7 @@ def run_full(args: argparse.Namespace) -> None:
                 "--rlt.start_in_teleop=false",
                 *_episode_outcome_argv(True, args.default_episode_success, args.discard_unlabeled_episodes),
                 "--intervention_state_machine_enabled=true",
-                f"--policy_sync_to_teleop={'true' if teleop_argv else 'false'}",
+                policy_sync_argv(args, bool(teleop_argv)),
                 "--play_sounds=true",
                 f"--left_intervention_key={args.left_intervention_key}",
             ]
@@ -933,8 +964,9 @@ def run_full(args: argparse.Namespace) -> None:
                     args.discard_unlabeled_episodes,
                 ),
                 "--intervention_state_machine_enabled=true",
-                f"--policy_sync_to_teleop={'true' if teleop_argv and args.initial_source == 'vla' else 'false'}",
+                policy_sync_argv(args, bool(teleop_argv) and args.initial_source == "vla"),
                 "--play_sounds=true",
+                f"--resume={'true' if resume_dir else 'false'}",
             ]
         if args.dry_run:
             print(" ".join(sys.argv))

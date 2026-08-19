@@ -24,14 +24,16 @@
       "type": "follower",
       "kind": "crp",
       "ip": "192.168.0.100",
-      "gp_index": 10
+      "gp_index": 10,
+      "gripper_init_ui50": 116
     },
     {
       "alias": "right_follower",
       "type": "follower",
       "kind": "crp",
       "ip": "192.168.0.101",
-      "gp_index": 20
+      "gp_index": 20,
+      "gripper_init_ui50": 223
     }
   ],
   "cameras": [

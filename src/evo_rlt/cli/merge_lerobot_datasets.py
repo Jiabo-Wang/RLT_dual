@@ -25,7 +25,13 @@ def parse_args() -> argparse.Namespace:
         "--input-parent",
         type=Path,
         required=True,
-        help="Directory containing record_* LeRobot dataset directories.",
+        action="append",
+        dest="input_parents",
+        metavar="DIR",
+        help=(
+            "Directory containing record_* LeRobot dataset directories. Repeat the flag "
+            "to merge several parents (e.g. one recording day each), in the order given."
+        ),
     )
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--output-repo-id", required=True)
@@ -42,22 +48,29 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def discover_datasets(input_parent: Path) -> list[Path]:
-    roots = sorted(
-        path
-        for path in input_parent.iterdir()
-        if path.is_dir() and (path / "meta" / "info.json").is_file()
-    )
-    if not roots:
-        raise FileNotFoundError(f"No LeRobot datasets found under {input_parent}")
+def discover_datasets(input_parents: list[Path]) -> list[Path]:
+    roots: list[Path] = []
+    for input_parent in input_parents:
+        found = sorted(
+            path
+            for path in input_parent.iterdir()
+            if path.is_dir() and (path / "meta" / "info.json").is_file()
+        )
+        if not found:
+            raise FileNotFoundError(f"No LeRobot datasets found under {input_parent}")
+        roots.extend(found)
+    resolved = [root.resolve() for root in roots]
+    if len(set(resolved)) != len(resolved):
+        raise ValueError("The same source dataset was discovered twice; check --input-parent values")
     return roots
 
 
-def prepare_output(output_root: Path, input_parent: Path, overwrite: bool) -> None:
+def prepare_output(output_root: Path, input_parents: list[Path], overwrite: bool) -> None:
     output = output_root.resolve()
-    inputs = input_parent.resolve()
-    if output == inputs or output in inputs.parents:
-        raise ValueError("Output must not be the input directory or one of its parents")
+    for input_parent in input_parents:
+        inputs = input_parent.resolve()
+        if output == inputs or output in inputs.parents:
+            raise ValueError("Output must not be an input directory or one of its parents")
     if not output.exists():
         return
     if not overwrite:
@@ -69,10 +82,20 @@ def prepare_output(output_root: Path, input_parent: Path, overwrite: bool) -> No
 
 def main() -> None:
     args = parse_args()
-    roots = discover_datasets(args.input_parent)
-    prepare_output(args.output_root, args.input_parent, args.overwrite)
+    roots = discover_datasets(args.input_parents)
+    prepare_output(args.output_root, args.input_parents, args.overwrite)
 
-    repo_ids = [f"{args.repo_id_prefix}{root.name.removeprefix('record_teleop_full_')}" for root in roots]
+    # With several parents the session timestamps can repeat across days, so keep the
+    # parent directory name in the generated repo ID to keep the log readable.
+    keep_parent_name = len(args.input_parents) > 1
+    repo_ids = []
+    for root in roots:
+        session = root.name.removeprefix("record_teleop_full_")
+        repo_ids.append(
+            f"{args.repo_id_prefix}{root.parent.name}_{session}"
+            if keep_parent_name
+            else f"{args.repo_id_prefix}{session}"
+        )
     source_meta = [
         LeRobotDatasetMetadata(repo_id=repo_id, root=root)
         for repo_id, root in zip(repo_ids, roots, strict=True)

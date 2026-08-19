@@ -841,6 +841,18 @@ def _crp_prepare_teach_start(robot) -> None:
             ok_left,
             ok_right,
         )
+    # Same class of bug one register over: the gripper's opening is not readable
+    # inside the control period, so the observation reports whatever this process
+    # last wrote -- and before the first write that fallback is 0, a fully closed
+    # gripper. Commanding a known opening here is what makes it true.
+    grip_left, grip_right = robot.seed_gripper_registers()
+    if not (grip_left and grip_right):
+        logging.warning(
+            "CRP: gripper seed rejected (left ok=%s, right ok=%s). The first "
+            "observation will not reflect the real gripper opening.",
+            grip_left,
+            grip_right,
+        )
     wait_before_gp_align(delay_s=TeleoperateDualCRPConfig().gp_align_delay_s)
 
 
@@ -921,21 +933,26 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
 
     try:
         if cfg.resume:
-            dataset = LeRobotDataset(
+            # LeRobotDataset.resume(), not the plain constructor: the constructor
+            # opens a dataset read-only (``writer is None``) and every add_frame then
+            # fails. The image writer is passed in here too -- the older API of
+            # constructing first and calling start_image_writer() afterwards no
+            # longer exists.
+            dataset = LeRobotDataset.resume(
                 cfg.dataset.repo_id,
                 root=cfg.dataset.root,
                 batch_encoding_size=cfg.dataset.video_encoding_batch_size,
                 vcodec=cfg.dataset.vcodec,
+                image_writer_processes=cfg.dataset.num_image_writer_processes,
+                image_writer_threads=(
+                    cfg.dataset.num_image_writer_threads_per_camera * len(robot.cameras)
+                    if hasattr(robot, "cameras")
+                    else 0
+                ),
                 streaming_encoding=cfg.dataset.streaming_encoding,
                 encoder_queue_maxsize=cfg.dataset.encoder_queue_maxsize,
                 encoder_threads=cfg.dataset.encoder_threads,
             )
-
-            if hasattr(robot, "cameras") and len(robot.cameras) > 0:
-                dataset.start_image_writer(
-                    num_processes=cfg.dataset.num_image_writer_processes,
-                    num_threads=cfg.dataset.num_image_writer_threads_per_camera * len(robot.cameras),
-                )
             sanity_check_dataset_robot_compatibility(dataset, robot, cfg.dataset.fps, dataset_features)
         else:
             # Create empty dataset or load existing saved episodes

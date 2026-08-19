@@ -142,6 +142,22 @@ class CRPArmDual(Robot):
         }
 
     @property
+    def _sdk_connected(self) -> bool:
+        """Both controllers are up, regardless of cameras.
+
+        ``is_connected`` also requires every camera to be streaming, which is the
+        right answer for "can this robot record" but the wrong one for the window
+        during ``connect()`` where the SDK is live and the cameras are not open yet.
+        Seeding the GP registers has to happen inside exactly that window.
+        """
+        crp = self.crp_arm_robot
+        if not crp.is_connected():
+            return False
+        if hasattr(crp, "is_connected_second") and callable(crp.is_connected_second):
+            return bool(crp.is_connected_second())
+        return self._second_connected
+
+    @property
     def is_connected(self) -> bool:
         crp = self.crp_arm_robot
         if not crp.is_connected():
@@ -213,6 +229,15 @@ class CRPArmDual(Robot):
                     "servo_power_on failed after dual connect (binding powers both arms in Auto)."
                 ) from exc
 
+        # Before the cameras, not after: the GP registers still hold the previous
+        # session's target from the moment the SDK connects, and a teach program that
+        # is already running acts on it immediately. Camera connect takes seconds --
+        # long enough for the arm to drive all the way there. Seeding with the pose
+        # the arm already holds cannot move anything, so the only thing that matters
+        # is doing it as early as possible.
+        if self.config.init_gp_on_connect:
+            self.seed_gp_registers_from_current_tcp()
+
         connected_cams: list = []
         try:
             for cam in self.cameras.values():
@@ -233,8 +258,6 @@ class CRPArmDual(Robot):
         self.configure()
         if self.config.init_gj_on_connect:
             self.seed_gj_registers_from_current_pose()
-        if self.config.init_gp_on_connect:
-            self.seed_gp_registers_from_current_tcp()
         logger.info("%s connected.", self)
 
     def seed_gp_registers_from_current_tcp(self) -> tuple[bool, bool]:
@@ -249,17 +272,25 @@ class CRPArmDual(Robot):
         -- it only makes the register live. This mirrors ``lock_gps_to_current_tcp``
         on the teleop path.
         """
-        if not self.is_connected:
+        if not self._sdk_connected:
             raise DeviceNotConnectedError(f"{self} is not connected.")
 
         gs = max(1, int(self.config.gp_trajectory_group_size))
         results: list[bool] = []
+        # Read through the SDK directly rather than read_end_pose_*: those also gate on
+        # ``is_connected`` and would fail here for the same camera reason.
+        crp = self.crp_arm_robot
         for label, register, read_tcp, send in (
-            ("left", self.config.gp_register_left, self.read_end_pose_first, self.send_GPs_first),
+            (
+                "left",
+                self.config.gp_register_left,
+                lambda: crp.read_end_pose_user(),
+                self.send_GPs_first,
+            ),
             (
                 "right",
                 self.config.gp_register_right,
-                self.read_end_pose_second,
+                lambda: crp.read_end_pose_user_second(),
                 self.send_GPs_second,
             ),
         ):
@@ -284,6 +315,50 @@ class CRPArmDual(Robot):
             results[0],
             self.config.gp_register_right,
             results[1],
+        )
+        return results[0], results[1]
+
+    def seed_gripper_registers(self) -> tuple[bool, bool]:
+        """Command each gripper to ``init_gripper_ui50_*`` and record it as the known state.
+
+        Without this the run starts with ``_last_ui50`` unset, so the first
+        ``get_observation`` reports ``0.0`` -- a fully closed gripper -- whatever the
+        gripper is actually doing. See ``init_gripper_ui50_left`` in the config for why
+        that particular lie is the damaging one.
+
+        Returns ``(left_ok, right_ok)``; an arm left unconfigured counts as ok and is
+        skipped, since "do not touch the gripper" is a legitimate choice for teleop.
+        """
+        if not self._sdk_connected:
+            raise DeviceNotConnectedError(f"{self} is not connected.")
+
+        results: list[bool] = []
+        for label, target, configured in (
+            ("left", "first", self.config.init_gripper_ui50_left),
+            ("right", "second", self.config.init_gripper_ui50_right),
+        ):
+            if configured is None:
+                logger.warning(
+                    "%s gripper seed: %s not configured (init_gripper_ui50_%s). The "
+                    "first observation will report ui50=0 (fully closed) regardless of "
+                    "the real opening.",
+                    self, label, label,
+                )
+                results.append(True)
+                continue
+            ui50 = max(0, min(255, int(configured)))
+            ok = bool(self._set_ui(target, GRIPPER_UI_OPEN, ui50))
+            if ok:
+                self._last_ui50[label] = float(ui50)
+            else:
+                logger.warning("%s gripper seed: UI50 write rejected for %s", self, label)
+            results.append(ok)
+
+        logger.info(
+            "%s gripper seed: left ui50=%s | right ui50=%s",
+            self,
+            self._last_ui50["left"],
+            self._last_ui50["right"],
         )
         return results[0], results[1]
 

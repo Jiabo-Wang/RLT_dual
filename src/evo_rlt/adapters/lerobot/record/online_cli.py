@@ -31,7 +31,8 @@ from evo_rlt.adapters.lerobot.record.common import (
     stage_follower_calibrations,
     stage_leader_calibrations,
 )
-from evo_rlt.adapters.lerobot.record.runner import prepare_lerobot_runtime
+from evo_rlt.adapters.lerobot.record.cli import add_policy_sync_arg
+from evo_rlt.adapters.lerobot.record.runner import policy_sync_argv, prepare_lerobot_runtime
 
 DEFAULT_DATASET_TAG = "online_rl"
 # lerobot's sanity_check_dataset_name() requires the dataset repo_id to start
@@ -144,7 +145,7 @@ def build_online_train_argv(args: argparse.Namespace, setup, paths, cal_dir: str
         "--intervention_state_machine_enabled=true",
         f"--left_intervention_key={args.left_intervention_key}",
         f"--right_intervention_key={args.right_intervention_key}",
-        f"--policy_sync_to_teleop={'true' if teleop_argv else 'false'}",
+        policy_sync_argv(args, bool(teleop_argv)),
         f"--vla_ref={'true' if args.vla_ref else 'false'}",
         f"--play_sounds={'true' if args.play_sounds else 'false'}",
         # Online RL training loop (see backend.OnlineRLConfig).
@@ -348,6 +349,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--fps", type=int, default=30)
     parser.add_argument("--setup-json", default=None)
     parser.add_argument("--dataset-tag", default=DEFAULT_DATASET_TAG)
+    add_policy_sync_arg(parser)
     parser.add_argument("--vcodec", default="h264")
     parser.add_argument("--log-level", default="INFO")
     parser.add_argument(

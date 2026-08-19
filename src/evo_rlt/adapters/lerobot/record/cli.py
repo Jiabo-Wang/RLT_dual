@@ -10,11 +10,38 @@ DEFAULT_COLLECT_DATASET_TAG = "vla_rlt_vla_test"
 DEFAULT_COLLECT_TASK = "Insert the copper screw into the black sleeve."
 
 
+def add_policy_sync_arg(parser: argparse.ArgumentParser) -> None:
+    """Opt-in for driving the leader arms from the policy action.
+
+    Off by default. Syncing writes the follower's action dict straight onto the leader's
+    motor bus, which only works when the two share a joint namespace. ``CRPArmDual``
+    commands a cartesian EE pose, so it raises ``KeyError: 'x'`` on the first
+    policy-driven frame. Turning this on needs an IK step the CRP adapter does not have.
+    """
+    parser.add_argument(
+        "--policy-sync-to-teleop",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Drive the leader arms to follow the policy action so they do not drift from "
+        "the follower. Requires a leader whose motor names match the robot's action keys; "
+        "the CRP arm commands a cartesian pose and is not compatible.",
+    )
+
+
 def add_common_record_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--initial-source", choices=["vla", "teleop"], required=True)
     parser.add_argument("--policy-path", default=None)
     parser.add_argument("--vla-path", default=None)
     parser.add_argument("--rl-token-path", default=None)
+    parser.add_argument(
+        "--rename-map",
+        default=None,
+        help=(
+            'JSON map from robot observation keys to the keys the checkpoint expects, e.g. '
+            '\'{"observation.images.top": "observation.images.camera1"}\'. Needed when a '
+            "pretrained policy (smolVLA) was finetuned under different camera names."
+        ),
+    )
     parser.add_argument("--task", default="Insert the copper screw into the black sleeve.")
     parser.add_argument("--num-episodes", type=int, default=1)
     parser.add_argument("--episode-time-s", type=int, default=3000)
@@ -27,6 +54,7 @@ def add_common_record_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--setup-json", default=None)
     parser.add_argument("--dataset-tag", default=None)
+    add_policy_sync_arg(parser)
     parser.add_argument("--vcodec", default="h264")
     parser.add_argument("--no-teleop", action="store_true", default=False)
     parser.add_argument("--default-episode-success", choices=["success", "failure"], default=None)
@@ -78,6 +106,7 @@ def add_default_collect_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--setup-json", default=None)
     parser.add_argument("--dataset-tag", default=DEFAULT_COLLECT_DATASET_TAG)
+    add_policy_sync_arg(parser)
     parser.add_argument("--vcodec", default="h264")
     parser.add_argument("--no-teleop", action="store_true", default=False)
     parser.add_argument("--log-level", default="INFO")
@@ -166,6 +195,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Only used with --split-critical-phase (grabs manual control as a safety net).",
     )
     full.add_argument("--left-intervention-key", default="i", help="Only used with --split-critical-phase.")
+    full.add_argument(
+        "--resume-dir",
+        default=None,
+        help="Append to an existing dataset directory instead of starting a new one. "
+        "--num-episodes is then the TOTAL target including what is already recorded, "
+        "not how many more to add.",
+    )
     full.set_defaults(func=run_full)
 
     live = subparsers.add_parser("live", help="Run policy live on the robot without saving a dataset.")

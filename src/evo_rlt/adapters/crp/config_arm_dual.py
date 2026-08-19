@@ -59,19 +59,44 @@ class CRPArmDualConfig(RobotConfig):
     # cell -- teleop drives GP10/GP20 while ``connect`` seeds GJ10/GJ20.
     gp_register_left: int = 10
     gp_register_right: int = 20
-    # Seed GP10/GP20 with the current TCP after connect.
+    # Seed GP10/GP20 with the current TCP during connect, before the cameras.
     #
-    # Off by default: switching it on regressed teleop to gripper-only -- the arms
-    # stopped executing GP while the gripper kept following. Teleop already writes a
-    # full GP group twice (``lock_gps_to_current_tcp``, then the align burst), and
-    # this added a third write *before* the teach program is started, which the
-    # controller evidently does not tolerate. The mechanism is not understood, so the
-    # default returns to the sequence teleop is known to work with.
+    # The GP registers outlive the process. A teach program left running acts on
+    # whatever is in them the moment the SDK connects, so an arm drives back to the
+    # previous session's pose with no operator input at all -- and camera connect
+    # gives it seconds in which to do so. Seeding with the pose the arm already holds
+    # cannot itself move anything.
     #
-    # Recording paths that call ``send_action`` without going through
-    # ``prepare_dual_gp_session`` may still need a seeded group; turn it on
-    # explicitly there and verify on hardware before trusting it.
-    init_gp_on_connect: bool = False
+    # This was off for a while, on the theory that an extra GP write regressed teleop
+    # to "gripper follows, arms do not". That symptom turned out to be the teach
+    # program not running at all (the gripper is driven by UI50 registers, which the
+    # controller services regardless of any program), so the write was never the
+    # cause.
+    init_gp_on_connect: bool = True
+    # Opening (UI50, 0-255, 0 closed) to command each gripper before a run starts.
+    # ``None`` leaves the gripper where it is, which costs the first observation.
+    #
+    # ``get_observation`` reports ``_last_ui50``, the value this process last *wrote*,
+    # because reading the real opening (UI56) is a ~43 ms SDK round trip that does not
+    # fit the control period. Until something writes, that mirror is ``None`` and the
+    # observation falls back to ``0.0`` -- which is not "unknown" to a policy, it is
+    # "fully closed". Teleop never notices: the leader's gripper position drives UI50
+    # from the very first frame. A policy has no leader, so it reads the fallback,
+    # and since the state channel is just the previous action echoed back, a policy
+    # trained on that channel copies it and clamps the gripper shut.
+    #
+    # Seeding by commanding is the cheap half of the fix: it makes the state known
+    # because we chose it. Reading it instead would be more faithful -- ``ui_probe``
+    # already streams UI50 -- but that subprocess has to connect before
+    # ``servo_power_on`` (see ``apply_ui_probe_connect_policy``), so wiring it into
+    # the record path means reordering connect, not adding a call.
+    #
+    # Pick a value the policy saw at episode start in its training data, not simply
+    # "wide open": the seed lands in the first observation, and an opening the
+    # demonstrations never began from is just a different way to be out of
+    # distribution.
+    init_gripper_ui50_left: int | None = None
+    init_gripper_ui50_right: int | None = None
     gp_trajectory_group_size: int = 5
     # Largest translation ``send_action`` will command in one call, in mm.
     #

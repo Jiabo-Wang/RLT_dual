@@ -34,7 +34,10 @@ Usage:
 from __future__ import annotations
 
 import fcntl
+import argparse
+import json
 import logging
+import time
 import struct
 from pathlib import Path
 
@@ -169,22 +172,126 @@ def resolve_camera_port(port: object) -> int | Path:
     return color_node_for_serial(text)
 
 
+WARMUP_FRAMES = 12
+DEFAULT_MANIFEST = Path("configs/crp_dual_manifest.json")
+
+
+def aliases_by_serial(manifest: Path = DEFAULT_MANIFEST) -> dict[str, str]:
+    """serial -> alias from a manifest, so output names cameras the way configs do."""
+    try:
+        cams = json.loads(manifest.read_text()).get("cameras", [])
+    except (OSError, ValueError):
+        return {}
+    out = {}
+    for cam in cams:
+        port = cam.get("port")
+        serial = port.get("serial") if isinstance(port, dict) else None
+        if serial:
+            out[str(serial)] = cam.get("alias", "?")
+    return out
+
+
+def _grab(dev: Path):
+    """One frame from a device, via the same camera class recording uses.
+
+    Not a bare ``cv2.VideoCapture``: opening a RealSense that way yields a uniformly
+    green image (all-zero YUV) unless something has already initialised it, which is
+    a picture rather than an error and looks exactly like a broken camera.
+    ``OpenCVCamera`` applies the fourcc/size/fps handshake that makes the sensor
+    actually start, so this sees what the recorder would see.
+
+    Opened and closed one camera at a time -- these share a USB controller and
+    concurrent opens are unreliable.
+    """
+    from lerobot.cameras.opencv.camera_opencv import OpenCVCamera
+    from lerobot.cameras.opencv.configuration_opencv import OpenCVCameraConfig
+
+    fmts = _fourccs(dev)
+    fourcc = next((f for f in ("YUYV", "MJPG") if f in fmts), None)
+    cam = OpenCVCamera(
+        OpenCVCameraConfig(index_or_path=dev, width=640, height=480, fps=30,
+                           fourcc=fourcc, warmup_s=2)
+    )
+    try:
+        cam.connect()
+    except Exception as exc:
+        print(f"    ({type(exc).__name__}: {str(exc)[:70]})")
+        return None
+    try:
+        rgb = cam.async_read(timeout_ms=2000)
+    except Exception:
+        return None
+    finally:
+        try:
+            cam.disconnect()
+        except Exception:
+            pass
+    import cv2
+
+    return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)  # OpenCVCamera yields RGB
+
+
+def _snapshot(rows: list[tuple[str, str, Path]], out_dir: Path) -> int:
+    """Save one frame per named camera, plus a labelled contact sheet."""
+    import cv2
+    import numpy as np
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    tiles = []
+    for alias, serial, dev in rows:
+        frame = _grab(dev)
+        if frame is None:
+            print(f"  {alias:<14} {dev.name:<10} no frame")
+            frame = np.zeros((480, 640, 3), dtype=np.uint8)
+        else:
+            cv2.imwrite(str(out_dir / f"{alias}.png"), frame)
+            print(f"  {alias:<14} {dev.name:<10} -> {out_dir / (alias + '.png')}")
+        tile = cv2.resize(frame, (640, 480))
+        cv2.rectangle(tile, (0, 0), (640, 34), (0, 0, 0), -1)
+        cv2.putText(tile, f"{alias}  {dev.name}  {serial}", (8, 24),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1, cv2.LINE_AA)
+        tiles.append(tile)
+
+    if not tiles:
+        print("  no named cameras in the manifest")
+        return 1
+    sheet = out_dir / "all.png"
+    cv2.imwrite(str(sheet), np.hstack(tiles))
+    print(f"\n  contact sheet: {sheet}")
+    # The RealSense v4l2 nodes stay busy for a while after release; starting a
+    # recording immediately hits "Timed out waiting for frame".
+    print("  wait ~15s before starting a recording (v4l2 nodes release slowly)")
+    return 0
+
+
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s", force=True)
+    ap = argparse.ArgumentParser(description="Map camera serials to /dev/video nodes.")
+    ap.add_argument("--snapshot", action="store_true", help="save one frame per named camera")
+    ap.add_argument("--out", type=Path, default=Path("outputs/camera_check"))
+    ap.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
+    args = ap.parse_args()
+
     groups = nodes_by_serial()
     if not groups:
         print("No V4L2 capture devices found.")
         return 1
+    names = aliases_by_serial(args.manifest)
 
-    print(f"{'serial':<20} {'color node':<12} formats")
-    for serial in sorted(groups):
+    rows: list[tuple[str, str, Path]] = []
+    print(f"{'name':<14} {'serial':<20} {'color node':<12} formats")
+    for serial in sorted(groups, key=lambda s: (names.get(s, "zz"), s)):
+        alias = names.get(serial, "-")
         try:
             dev = color_node_for_serial(serial)
         except ValueError as exc:
-            print(f"{serial:<20} {'-':<12} {exc}")
+            print(f"{alias:<14} {serial:<20} {'-':<12} {exc}")
             continue
-        print(f"{serial:<20} {dev.name:<12} {','.join(_fourccs(dev))}")
-    return 0
+        print(f"{alias:<14} {serial:<20} {dev.name:<12} {','.join(_fourccs(dev))}")
+        if alias != "-":
+            rows.append((alias, serial, dev))
+
+    return _snapshot(rows, args.out) if args.snapshot else 0
 
 
 if __name__ == "__main__":

@@ -62,7 +62,8 @@ ls -l license.key
 ls ~/.cache/huggingface/lerobot/calibration/teleoperators/crp_dual_leader/
 ```
 ```bash
-ffplay -fflags nobuffer -flags low_delay /dev/video8
+conda activate rlt_dual && cd ~/intern/RLT_dual
+python -m evo_rlt.adapters.lerobot.record.camera_resolve --snapshot
 ```
 
 ### 主臂标定
@@ -81,27 +82,6 @@ python -m evo_rlt.adapters.crp.calibrate_leader --side right --show-path
 conda activate rlt_dual && cd ~/intern/RLT_dual
 evo-rlt-crp-teleop
 ```
-
-**启动前先把两臂的 J6 摇回 0°**（示教器关节坐标模式）。J6 不在 0 时，示教器程序一启动
-就可能报 `J6轴关节速度超过最大允许值` —— `MoveL` 拿到笛卡尔位姿后自己解 IK，6 轴机器人
-同一位姿有多组关节解，J6 已经转开时控制器可能解到另一个分支，第一个动作就是把 J6 全速
-甩过去。实测：右臂 J6=27° 必报，J6=0° 从不报。程序**启动那一刻**才有这个风险，跑起来
-之后随便转。
-
-启动时若 J6 偏离 0 超过 5°，日志会在倒计时前警告：
-
-```
-[right] J6 is at 27.1 deg, not near 0. ...
-```
-
-按 START 的时机也要对——等这两行打印出来**之后**再按：
-
-```
-[left]  GP locked to current TCP (...)
-[right] GP locked to current TCP (...)
-```
-
-这两行之前 GP 寄存器里还是上次退出时锁的旧坐标，提前按会让机器人冲向那个旧位置。
 ## 3. 采数据
 ```bash
 conda activate rlt_dual && cd ~/intern/RLT_dual
@@ -110,25 +90,26 @@ evo-rlt-record full --initial-source teleop \
   --setup-json configs/crp_dual_manifest.json \
   --dataset-tag screw_demo_v1 \
   --task "Pick up the workpiece and place it on the platform. Remove the pin from the holder and insert it into the hole on top of the workpiece. Then place the assembled object in the target area." \
-  --num-episodes 3 \
+  --num-episodes 30 \
+  --episode-time-s 300 \
+  --reset-time-s 8 \
+  --vcodec h264 \
+  --discard-unlabeled-episodes
+
+```
+# 继续采集数据
+conda activate rlt_dual && cd ~/intern/RLT_dual
+
+evo-rlt-record full --initial-source teleop \
+  --setup-json configs/crp_dual_manifest.json \
+  --resume-dir data/crp_dual/0818_screw_demo_v1/record_teleop_full_110819  \
+  --task "Pick up the workpiece and place it on the platform. Remove the pin from the holder and insert it into the hole on top of the workpiece. Then place the assembled object in the target area." \
+  --num-episodes 30 \
   --episode-time-s 300 \
   --reset-time-s 10 \
   --vcodec h264 \
   --discard-unlabeled-episodes
-```
 
-### 每条 episode 的流程
-
-```
-录制（最长 --episode-time-s）→ 按 s/f 标注 → 复位窗口（--reset-time-s）→ 下一条
-```
-
-VLA 阶段（`--initial-source vla`，有策略在跑）**不绑定 `f`**：跑坏的一条用 ← 重录，
-而不是标记失败。`s` 和方向键照常。副作用是失去了标注失败的唯一手段，而在线 RL 的
-warmup 会统计失败条数（`min_warmup_failures`，默认 3）—— 要跑在线 RL 得把这个阈值
-调下来，否则 warmup 永远结束不了。
-
-`--discard-unlabeled-episodes` 会丢掉没按 s/f 就超时结束的条目；不想手动标注就换成 `--default-episode-success success`。
 
 ### 采完必须先查实际帧率
 
@@ -147,44 +128,55 @@ print(f'实际 {1000/st.median(c[1]):.1f} Hz | send {st.median(c[4]):.0f}ms obs 
 ### 只看录像（不动机器人）
 
 ```bash
+conda activate rlt_dual && cd ~/intern/RLT_dual
+
 ls -dt data/crp_dual/*/*/          # 看有哪些，改下面的路径
 
-HF_HUB_OFFLINE=1 lerobot-dataset-viz \
-  --root data/crp_dual/0815_screw_demo_v1/record_teleop_full_154118 \
-  --repo-id local/record_teleop_full_154118 \
-  --episode-index 0 --mode local
+evo-rlt-dataset-viz \
+  --root data/crp_dual/0819_screw_demo_v1/record_teleop_full_111237 \
+  --repo-id local/record_teleop_full_111237 \
+  --episodes all \
+  --stride 4 \
+  --jpeg-quality 85 \
+  --batch-size 32 \
+  --num-workers 4 \
+  --memory-limit 75% \
+  --tolerance-s 1e-4
+
+# 看合并后的所有
+evo-rlt-dataset-viz \
+  --root data/crp_dual/crp_merged_screw_v1 \
+  --episodes all \
+  --stride 4 \
+  --jpeg-quality 85 \
+  --batch-size 32 \
+  --num-workers 4 \
+  --memory-limit 75% \
+  --tolerance-s 1e-4
+
 ```
 
-目录名里的 `0815_screw_demo_v1` 来自 `--dataset-tag`，不是固定的 `teleop_full`。
-`repo-id` = 末级目录名前加 `local/`。`HF_HUB_OFFLINE=1` 不能省：`--root` 写错时
-lerobot 会去查 HuggingFace Hub，报一个和本地路径无关的 404。
+```bash
+# 1. 先扫曲线找可疑的几条：不碰 mp4，72 条 / 3 万帧约 25 秒
+evo-rlt-dataset-viz --root data/crp_dual/0817_screw_demo_v1/record_teleop_full_172919 --no-images
+
+# 2. 再对着那几条细看，全帧不抽
+evo-rlt-dataset-viz --root data/crp_dual/0818_screw_demo_v1/record_teleop_full_154945 \
+  --episodes 79-82 --stride 1
+
+# 3. 数据在远端机器上
+evo-rlt-dataset-viz --root data/crp_dual/0817_screw_demo_v1/record_teleop_full_172919 \
+  --episodes all --stride 8 --serve --grpc-port 9876
+```
 
 ### 真机回放
 
 ```bash
 evo-rlt-crp-replay \
-  --root data/crp_dual/0815_screw_demo_v1/record_teleop_full_154118 \
-  --repo-id local/record_teleop_full_154118 \
+  --root data/crp_dual/0817_screw_demo_v1/record_teleop_full_140733 \
+  --repo-id local/record_teleop_full_140733 \
   --episode 0
 ```
-
-同样在倒计时期间按绿色 START。数据集存的是**绝对** GP 位姿，所以起播前会检查第 0 帧离当前 TCP 多远，超过 50mm 直接拒绝（避免全速横穿工作空间）：
-
-```
-[left] frame 0 is 12 mm from the current TCP
-```
-
-超了就先把臂摇到起始位姿附近；确认路径无障碍再用 `--allow-jump` 跳过检查。
-
-| 参数 | 默认 |
-| --- | --- |
-| `--episode` | 0 |
-| `--fps` | 数据集自带的 |
-| `--max-jump-mm` | 50 |
-| `--allow-jump` | 关 |
-| `--start-delay-s` | 5 |
-
-用的是 `lerobot-replay` 之外的独立入口，因为 CRP 需要 START 倒计时和第 0 帧跳跃保护，那两样它没有。动作向量按录制原样下发，不做任何重映射。
 
 ### 数据管理
 
@@ -202,7 +194,306 @@ lerobot-edit-dataset --repo_id local/xxx --root data/crp_dual/.../xxx \
 
 失败的运行会留下 0 帧的空目录，直接 `rm -rf` 掉。
 
-## 5. 排障
+## 5. 合并数据
+
+### 合并 session
+
+```bash
+conda activate rlt_dual && cd ~/intern/RLT_dual
+
+HF_HUB_OFFLINE=1 python -m evo_rlt.cli.merge_lerobot_datasets \
+  --input-parent data/crp_dual/0817_screw_demo_v1 \
+  --output-repo-id local/crp_merged_screw_v1 \
+  --output-root data/crp_dual/crp_merged_screw_v1 \
+  --repo-id-prefix local/crp_0817_
+```
+conda activate rlt_dual && cd ~/intern/RLT_dual
+
+HF_HUB_OFFLINE=1 python -m evo_rlt.cli.merge_lerobot_datasets \
+  --input-parent data/crp_dual/0817_screw_demo_v1 \
+  --input-parent data/crp_dual/0818_screw_demo_v1 \
+  --output-repo-id local/crp_merged_screw_v2 \
+  --output-root data/crp_dual/crp_merged_screw_v2 \
+  --repo-id-prefix local/crp_
+
+### 合并多天的 session
+
+`--input-parent` 可以重复给，按给出的顺序拼接。**不要覆盖正在被训练读取的目录**，换一个新的 `--output-root`。
+
+```bash
+conda activate rlt_dual && cd ~/intern/RLT_dual
+
+HF_HUB_OFFLINE=1 python -m evo_rlt.cli.merge_lerobot_datasets \
+  --input-parent data/crp_dual/0817_screw_demo_v1 \
+  --input-parent data/crp_dual/0818_screw_demo_v1 \
+  --output-repo-id local/crp_merged_screw_v2 \
+  --output-root data/crp_dual/crp_merged_screw_v2 \
+  --repo-id-prefix local/crp_
+```
+
+合并前要求各 session 的 `fps` / `robot_type` / 相机 key 与分辨率完全一致，脚本最后会核对 episode 数和帧数是否等于各输入之和，不一致直接报错。
+
+### 核对合并结果
+
+```bash
+python -c "
+import json;i=json.load(open('data/crp_dual/crp_merged_screw_v1/meta/info.json'))
+print(i['total_episodes'],'ep /',i['total_frames'],'帧 @',i['fps'],'fps')"
+```
+
+### 回放合并后的数据
+
+```bash
+HF_HUB_OFFLINE=1 lerobot-dataset-viz \
+  --root data/crp_dual/crp_merged_screw_v2 \
+  --repo-id local/crp_merged_screw_v2 \
+  --episode-index 463 --mode local
+```
+
+### 删除坏 episode
+
+```bash
+lerobot-edit-dataset \
+  --repo_id local/crp_merged_screw_v1 \
+  --root data/crp_dual/crp_merged_screw_v1 \
+  --new_repo_id local/crp_merged_screw_v1 \
+  --new_root data/crp_dual/crp_merged_screw_v1 \
+  --operation.type delete_episodes \
+  --operation.episode_indices "[3]"
+```
+
+## 6. 训练 ACT
+
+### 训练
+
+```bash
+conda activate rlt_dual && cd ~/intern/RLT_dual
+
+HF_HUB_OFFLINE=1 lerobot-train \
+  --dataset.repo_id=local/crp_merged_screw_v2 \
+  --dataset.root=data/crp_dual/crp_merged_screw_v2 \
+  --policy.type=act \
+  --policy.chunk_size=32 \
+  --policy.n_action_steps=32 \
+  --policy.device=cuda \
+  --policy.push_to_hub=false \
+  --batch_size=8 \
+  --steps=200000 \
+  --save_freq=20000 \
+  --eval_freq=0 \
+  --num_workers=2 \
+  --wandb.enable=true \
+  --wandb.project=crp_dual_act \
+  --wandb.disable_artifact=true \
+  --output_dir=outputs/act_crp_screw_v2 \
+  --job_name=act_crp_screw_v2
+
+```
+
+### 续训
+
+```bash
+HF_HUB_OFFLINE=1 lerobot-train \
+  --config_path=outputs/act_crp_screw_v1/checkpoints/last/pretrained_model/train_config.json \
+  --resume=true
+```
+
+### 部署 / 采 ACT baseline
+
+```bash
+
+conda activate rlt_dual && cd ~/intern/RLT_dual
+
+evo-rlt-record full --initial-source vla \
+  --setup-json configs/crp_dual_manifest.json \
+  --policy-path outputs/act_crp_screw_v2/checkpoints/080000/pretrained_model \
+  --task "Pick up the workpiece and place it on the platform. Remove the pin from the holder and insert it into the hole on top of the workpiece. Then place the assembled object in the target area." \
+  --dataset-tag act_eval_080000 \
+  --num-episodes 10 \
+  --episode-time-s 300 \
+  --reset-time-s 10 \
+  --vcodec h264 \
+  --no-teleop
+```
+
+## 7. 训练 smolVLA
+
+### 环境补充（一次性）
+
+```bash
+conda activate rlt_dual
+pip install 'num2words>=0.5.14,<0.6.0'
+```
+
+### 下载权重（一次性）
+
+```bash
+conda activate rlt_dual && cd ~/intern/RLT_dual
+
+python -c "
+from huggingface_hub import snapshot_download
+print(snapshot_download('lerobot/smolvla_base'))"
+
+python -c "
+from transformers import AutoProcessor
+AutoProcessor.from_pretrained('HuggingFaceTB/SmolVLM2-500M-Video-Instruct')
+print('processor ok')"
+```
+
+### 训练
+
+```bash
+conda activate rlt_dual && cd ~/intern/RLT_dual
+
+RM='{"observation.images.top": "observation.images.camera1", "observation.images.left_wrist": "observation.images.camera2", "observation.images.right_wrist": "observation.images.camera3"}'
+
+HF_HUB_OFFLINE=1 lerobot-train \
+  --dataset.repo_id=local/crp_merged_screw_v2 \
+  --dataset.root=data/crp_dual/crp_merged_screw_v2 \
+  --policy.path=lerobot/smolvla_base \
+  --policy.load_vlm_weights=false \
+  --policy.chunk_size=32 \
+  --policy.n_action_steps=32 \
+  --policy.scheduler_decay_steps=30000 \
+  --policy.device=cuda \
+  --policy.push_to_hub=false \
+  --rename_map="$RM" \
+  --batch_size=16 \
+  --steps=30000 \
+  --save_freq=5000 \
+  --eval_freq=0 \
+  --num_workers=2 \
+  --wandb.enable=true \
+  --wandb.project=crp_dual_smolvla \
+  --wandb.disable_artifact=true \
+  --output_dir=outputs/smolvla_crp_screw_v1 \
+  --job_name=smolvla_crp_screw_v1
+```
+
+### 续训
+
+```bash
+conda activate rlt_dual && cd ~/intern/RLT_dual
+
+HF_HUB_OFFLINE=1 lerobot-train \
+  --config_path=outputs/smolvla_crp_screw_v1/checkpoints/last/pretrained_model/train_config.json \
+  --resume=true
+```
+
+### 部署前 dry-run
+
+```bash
+conda activate rlt_dual && cd ~/intern/RLT_dual
+
+RM='{"observation.images.top": "observation.images.camera1", "observation.images.left_wrist": "observation.images.camera2", "observation.images.right_wrist": "observation.images.camera3"}'
+
+evo-rlt-record full --initial-source vla \
+  --setup-json configs/crp_dual_manifest.json \
+  --policy-path outputs/smolvla_crp_screw_v1/checkpoints/last/pretrained_model \
+  --rename-map "$RM" \
+  --task "Pick up the workpiece and place it on the platform. Remove the pin from the holder and insert it into the hole on top of the workpiece. Then place the assembled object in the target area." \
+  --dataset-tag smolvla_eval \
+  --num-episodes 10 \
+  --episode-time-s 300 \
+  --reset-time-s 10 \
+  --vcodec h264 \
+  --no-teleop \
+  --dry-run
+```
+
+### 部署 / 采 smolVLA baseline
+
+```bash
+conda activate rlt_dual && cd ~/intern/RLT_dual
+
+RM='{"observation.images.top": "observation.images.camera1", "observation.images.left_wrist": "observation.images.camera2", "observation.images.right_wrist": "observation.images.camera3"}'
+
+evo-rlt-record full --initial-source vla \
+  --setup-json configs/crp_dual_manifest.json \
+  --policy-path outputs/smolvla_crp_screw_v1/checkpoints/last/pretrained_model \
+  --rename-map "$RM" \
+  --task "Pick up the workpiece and place it on the platform. Remove the pin from the holder and insert it into the hole on top of the workpiece. Then place the assembled object in the target area." \
+  --dataset-tag smolvla_eval \
+  --num-episodes 10 \
+  --episode-time-s 300 \
+  --reset-time-s 10 \
+  --vcodec h264 \
+  --no-teleop
+```
+
+## 8. 训练 pi0.5
+
+### SFT
+
+```bash
+export TORCHDYNAMO_DISABLE=1
+
+python -m lerobot.scripts.lerobot_train \
+  --dataset.repo_id=local/crp_merged_screw_v1 \
+  --dataset.root=data/crp_dual/crp_merged_screw_v1 \
+  --policy.path=<PI05_BASE_DIR> \
+  --policy.device=cuda \
+  --policy.dtype=bfloat16 \
+  --policy.push_to_hub=false \
+  --batch_size=8 \
+  --steps=100000 \
+  --save_freq=10000 \
+  --eval_freq=0 \
+  --num_workers=2 \
+  --tolerance_s=1e-4 \
+  --output_dir=outputs/pi05_crp_ft \
+  --job_name=pi05_crp_ft
+```
+
+### 续训
+
+```bash
+export TORCHDYNAMO_DISABLE=1
+
+python -m lerobot.scripts.lerobot_train \
+  --config_path=outputs/pi05_crp_ft/checkpoints/last/pretrained_model/train_config.json \
+  --resume=true
+```
+
+### 接着已有 ckpt 再训
+
+```bash
+export TORCHDYNAMO_DISABLE=1
+
+python -m lerobot.scripts.lerobot_train \
+  --dataset.repo_id=local/crp_merged_screw_v1 \
+  --dataset.root=data/crp_dual/crp_merged_screw_v1 \
+  --policy.path=outputs/pi05_crp_ft/checkpoints/last/pretrained_model \
+  --policy.device=cuda \
+  --policy.dtype=bfloat16 \
+  --policy.push_to_hub=false \
+  --batch_size=8 \
+  --steps=100000 \
+  --save_freq=10000 \
+  --eval_freq=0 \
+  --num_workers=2 \
+  --tolerance_s=1e-4 \
+  --output_dir=outputs/pi05_crp_ft_stage2 \
+  --job_name=pi05_crp_ft_stage2
+```
+
+### 部署 / 采 pi0.5 baseline
+
+```bash
+conda activate rlt_dual && cd ~/intern/RLT_dual
+
+evo-rlt-record full --initial-source vla \
+  --setup-json configs/crp_dual_manifest.json \
+  --policy-path outputs/pi05_crp_ft/checkpoints/last/pretrained_model \
+  --task "Pick up the workpiece and place it on the platform. Remove the pin from the holder and insert it into the hole on top of the workpiece. Then place the assembled object in the target area." \
+  --dataset-tag pi05_baseline_eval \
+  --num-episodes 30 \
+  --episode-time-s 300 \
+  --reset-time-s 10 \
+  --vcodec h264
+```
+
+## 9. 排障
 
 **`unlicensed` / `Failed to obtain IRobotService`**
 仓库根目录缺 `license.key`。SDK 按进程 CWD 找。
@@ -218,30 +509,3 @@ J6 没归零。示教器上把 J6 摇回 0° 再启动，见第 2 节。跟遥�
 
 **每次连接都提示重新标定**
 舵机 EEPROM 和标定文件对不上。按 **ENTER** 用文件里的值写回舵机；按 `c` 是全量重标。
-
-**相机报 `No camera with serial ...`**
-相机没插，或序列号写错。报错会列出实际连接的序列号。
-
-## 6. 实测数据（2026-08-14，左臂）
-
-| 项 | 值 |
-| --- | --- |
-| ping 控制器 | 1.4 ms |
-| SDK 单次调用 | 43 ms |
-| 双臂 GP 下发 | 46 ms |
-| 控制器死区 | 178 ms |
-| GP 拒绝率 | 0% |
-| 从臂速度（调倍率前 / 后） | 28 / ~222 mm/s |
-| 三相机并发 | 23.8 fps @640x480 |
-
-主循环上限 16–21 Hz，所以 `--fps` 定 16。
-
-## 7. 待办
-
-- [ ] **上机验证采集与回放**。以下四处修复只过了单元测试和离线数据，未经真机：
-  leader 关节→GP 映射接线（`record_action.py` 原本零引用）、`send_action` 的 UI50
-  写入门控（实测 send 183ms→预期 46ms）、`_last_ui50` 初始化、connect 后的 START 倒计时
-- [ ] 相机三台并发不稳定：同一 USB3 控制器上 isoc 带宽预留冲突，降分辨率/帧率/MJPG/
-  backend/warmup 均无效。正解是装 `pyrealsense2` 改走 lerobot 原生 realsense 后端
-- [ ] `record/hil.py` 干预释放靠写主臂 `Goal_Position`，CRP 做不到，改成重新对齐 GP
-- [ ] （可选）放开 wrist_flex：标定 `(axis, sign)`；查清右臂限幅为何比左臂紧一个数量级

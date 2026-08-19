@@ -86,8 +86,20 @@ def test_segment_rlt_argv_marks_key_segment_with_teleop_start_and_rtc():
     assert "--rlt.start_in_teleop=true" in argv
     assert "--rlt.rtc_enabled=true" in argv
     assert "--enable_episode_outcome_labeling=true" in argv
-    assert "--policy_sync_to_teleop=true" in argv
+    # Off unless asked for: syncing writes the follower's action dict onto the leader's
+    # motor bus, which the CRP arm's cartesian action space cannot satisfy.
+    assert "--policy_sync_to_teleop=false" in argv
     assert "--policy.path=/tmp/ac" in argv
+
+    args.policy_sync_to_teleop = True
+    opted_in = build_segment_record_argv(
+        args=args,
+        setup=setup,
+        paths=paths,
+        cal_dir="/tmp/cal",
+        teleop_argv=["--teleop.type=bi_so_leader"],
+    )
+    assert "--policy_sync_to_teleop=true" in opted_in
 
 
 def test_pedal_listener_routes_record_events_and_episode_outcome(monkeypatch):
@@ -313,7 +325,7 @@ def test_default_collect_argv_matches_best_real_robot_rtc_chunks():
     assert "--require_episode_success_label=true" in argv
     assert "--dataset.video_encoding_batch_size=6" in argv
     assert "--dataset.streaming_encoding=true" in argv
-    assert "--policy_sync_to_teleop=true" in argv
+    assert "--policy_sync_to_teleop=false" in argv
     assert "--vla_ref=true" in argv
 
 
@@ -361,7 +373,7 @@ def test_default_collect_only_critical_starts_recording_on_first_r_and_ends_on_s
     assert "--rlt.rl_phase_key_toggles_critical_phase=true" not in argv
     assert "--enable_episode_outcome_labeling=true" in argv
     assert "--require_episode_success_label=true" in argv
-    assert "--policy_sync_to_teleop=true" in argv
+    assert "--policy_sync_to_teleop=false" in argv
 
 
 def test_default_collect_start_with_teleop_sets_episode_initial_source():

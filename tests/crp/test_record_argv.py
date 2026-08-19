@@ -73,6 +73,21 @@ class TestCrpBranch:
         assert _flag(argv, "--robot.gp_register_left") == "10"
         assert _flag(argv, "--robot.gp_register_right") == "20"
 
+    def test_gripper_seed_comes_from_the_manifest(self):
+        followers = [dict(CRP_FOLLOWERS[0]), dict(CRP_FOLLOWERS[1])]
+        followers[0]["gripper_init_ui50"] = 116
+        followers[1]["gripper_init_ui50"] = 223
+        argv = _argv(followers, CAMERAS)
+
+        assert _flag(argv, "--robot.init_gripper_ui50_left") == "116"
+        assert _flag(argv, "--robot.init_gripper_ui50_right") == "223"
+
+    def test_gripper_seed_is_omitted_when_the_manifest_is_silent(self):
+        """Absent, not zero: 0 is a real UI50 value meaning "fully closed"."""
+        argv = _argv(CRP_FOLLOWERS, CAMERAS)
+
+        assert not any(item.startswith("--robot.init_gripper_ui50") for item in argv)
+
     def test_top_camera_is_not_dropped(self):
         """The SO101 split table has no entry for ``top``; the CRP path must keep it."""
         argv = _argv(CRP_FOLLOWERS, CAMERAS)
