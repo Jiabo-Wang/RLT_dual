@@ -111,7 +111,11 @@ class CRPArmDualConfig(RobotConfig):
     # cap and should be reserved for bench work with the workspace clear.
     max_gp_step_mm: float = 50.0
     cameras: dict[str, CameraConfig] = field(default_factory=dict)
-    # Retries after transient ``cam.read()`` failures (same idea as ``crp_arm``).
+    # Cameras already maintain one background capture thread each. Consume those
+    # buffers via async_read instead of forcing three sequential fresh hardware
+    # reads (~56 ms measured). This timeout only applies when no frame is buffered.
+    camera_async_read_timeout_ms: int = 100
+    # Retries after transient camera failures (same idea as ``crp_arm``).
     camera_read_retries: int = 2
     # Retries after a transient joint read failure ("getCurrentJoint failed for second
     # robot"). The controller refuses the occasional read while it is busy servicing a

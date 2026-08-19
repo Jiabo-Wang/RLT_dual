@@ -90,9 +90,9 @@ evo-rlt-record full --initial-source teleop \
   --setup-json configs/crp_dual_manifest.json \
   --dataset-tag screw_demo_v1 \
   --task "Pick up the workpiece and place it on the platform. Remove the pin from the holder and insert it into the hole on top of the workpiece. Then place the assembled object in the target area." \
-  --num-episodes 30 \
+  --num-episodes 90 \
   --episode-time-s 300 \
-  --reset-time-s 8 \
+  --reset-time-s 7 \
   --vcodec h264 \
   --discard-unlabeled-episodes
 
@@ -104,7 +104,7 @@ evo-rlt-record full --initial-source teleop \
   --setup-json configs/crp_dual_manifest.json \
   --resume-dir data/crp_dual/0818_screw_demo_v1/record_teleop_full_110819  \
   --task "Pick up the workpiece and place it on the platform. Remove the pin from the holder and insert it into the hole on top of the workpiece. Then place the assembled object in the target area." \
-  --num-episodes 30 \
+  --num-episodes 50 \
   --episode-time-s 300 \
   --reset-time-s 10 \
   --vcodec h264 \
@@ -121,7 +121,11 @@ c=list(zip(*[[float(x) for x in r] for r in rows[1:] if len(r)==len(h)]))
 print(f'实际 {1000/st.median(c[1]):.1f} Hz | send {st.median(c[4]):.0f}ms obs {st.median(c[2]):.0f}ms')"
 ```
 
-到 14–16 Hz 才算对。**低于这个值的数据不要用来训练** —— 数据集会按 16 fps 存时间戳，实际采得慢就等于时间戳造假，回放速度和 action chunk 的时间尺度都是错的。
+三路相机使用后台采集，控制循环只取各自最新的新帧；结束时还会输出
+`/tmp/frame_timing_summary.json`。目标是中位实际频率至少 15.2 Hz，且
+`slow_fraction`（超过目标周期 1.2 倍的帧）不高于 10%。不满足时终端会打印
+`[Timing]` warning，当前 episode 不应并入训练集。数据集按 16 fps 写时间戳，
+实际采得慢会让回放速度和 action chunk 的时间尺度都出错。
 
 ## 4. 回放
 
@@ -264,37 +268,55 @@ lerobot-edit-dataset \
 
 ## 6. 训练 ACT
 
+### 先统一 CRP roll 表示（只需执行一次）
+
+CRP 锁定姿态位于欧拉角的 `-180/+180` 分界，同一姿态在原始数据里有两种数值。
+只处理合并后的 v3；`0817/0818/0819_screw_demo_v1` 三天原始 session 不会被修改。
+
+```bash
+python -m evo_rlt.cli.canonicalize_crp_rolls \
+  --root data/crp_dual/crp_merged_screw_v3
+```
+
+清洗后 `left_roll.pos` / `right_roll.pos` 应当都是 `-180`，必须重新训练，不能续训
+使用旧归一化统计量的 checkpoint。
+
 ### 训练
+
+直接使用 v3 的全部 648 条 episode 训练，不留验证集。
 
 ```bash
 conda activate rlt_dual && cd ~/intern/RLT_dual
 
 HF_HUB_OFFLINE=1 lerobot-train \
-  --dataset.repo_id=local/crp_merged_screw_v2 \
-  --dataset.root=data/crp_dual/crp_merged_screw_v2 \
+  --dataset.repo_id=local/crp_merged_screw_v3 \
+  --dataset.root=data/crp_dual/crp_merged_screw_v3 \
   --policy.type=act \
   --policy.chunk_size=32 \
-  --policy.n_action_steps=32 \
+  --policy.n_action_steps=8 \
   --policy.device=cuda \
   --policy.push_to_hub=false \
   --batch_size=8 \
-  --steps=200000 \
-  --save_freq=20000 \
+  --steps=100000 \
+  --save_freq=10000 \
   --eval_freq=0 \
   --num_workers=2 \
   --wandb.enable=true \
   --wandb.project=crp_dual_act \
   --wandb.disable_artifact=true \
-  --output_dir=outputs/act_crp_screw_v2 \
-  --job_name=act_crp_screw_v2
+  --output_dir=outputs/act_crp_screw_v3 \
+  --job_name=act_crp_screw_v3
 
 ```
+
+当前没有仿真评估环境，因此 `eval_freq` 保持为 `0`。通过定期保存 checkpoint，并在固定
+真机工况下比较成功率来选择部署模型。
 
 ### 续训
 
 ```bash
 HF_HUB_OFFLINE=1 lerobot-train \
-  --config_path=outputs/act_crp_screw_v1/checkpoints/last/pretrained_model/train_config.json \
+  --config_path=outputs/act_crp_screw_v3/checkpoints/last/pretrained_model/train_config.json \
   --resume=true
 ```
 
@@ -306,7 +328,8 @@ conda activate rlt_dual && cd ~/intern/RLT_dual
 
 evo-rlt-record full --initial-source vla \
   --setup-json configs/crp_dual_manifest.json \
-  --policy-path outputs/act_crp_screw_v2/checkpoints/080000/pretrained_model \
+  --policy-path outputs/act_crp_screw_v3/checkpoints/080000/pretrained_model \
+  --policy-n-action-steps 8 \
   --task "Pick up the workpiece and place it on the platform. Remove the pin from the holder and insert it into the hole on top of the workpiece. Then place the assembled object in the target area." \
   --dataset-tag act_eval_080000 \
   --num-episodes 10 \

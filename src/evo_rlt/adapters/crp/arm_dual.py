@@ -37,6 +37,8 @@ from lerobot.cameras.utils import make_cameras_from_configs
 from lerobot.utils.errors import DeviceAlreadyConnectedError, DeviceNotConnectedError
 
 from lerobot.robots.robot import Robot
+
+from .action_angles import canonicalize_crp_roll_deg
 from .config_arm_dual import CRPArmDualConfig
 from .crp_ui import (
     GRIPPER_UI_ACC,
@@ -557,9 +559,11 @@ class CRPArmDual(Robot):
             start = time.perf_counter()
             for attempt in range(n_retries + 1):
                 try:
-                    obs_dict[cam_key] = cam.read()
+                    obs_dict[cam_key] = cam.async_read(
+                        timeout_ms=max(1, int(self.config.camera_async_read_timeout_ms))
+                    )
                     break
-                except RuntimeError:
+                except (RuntimeError, TimeoutError):
                     if attempt >= n_retries:
                         raise
                     logger.warning(
@@ -661,12 +665,13 @@ class CRPArmDual(Robot):
                 f"{'...' if len(missing) > 6 else ''}"
             )
 
-        poses = {
-            arm: self._cap_gp_step(
-                arm, [float(action[f"{arm}_{axis}.pos"]) for axis in _GP_COMPONENTS]
-            )
-            for arm in ("left", "right")
-        }
+        poses = {}
+        for arm in ("left", "right"):
+            pose = [float(action[f"{arm}_{axis}.pos"]) for axis in _GP_COMPONENTS]
+            # This task's locked orientation sits on the Euler branch cut. Never
+            # record or send equivalent +180/-180 spellings as distinct targets.
+            pose[3] = canonicalize_crp_roll_deg(pose[3])
+            poses[arm] = self._cap_gp_step(arm, pose)
 
         with self._sdk_lock:
             crp = self.crp_arm_robot

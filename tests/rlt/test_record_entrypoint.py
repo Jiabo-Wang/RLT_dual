@@ -7,6 +7,8 @@ import pytest
 
 from evo_rlt.adapters.lerobot.record.cli import build_parser
 from evo_rlt.adapters.lerobot.record import runner
+from evo_rlt.adapters.lerobot.record.common import build_policy_overrides
+from evo_rlt.adapters.lerobot.record.loop import summarize_frame_timings_ms
 from evo_rlt.adapters.lerobot.record.runner import (
     _collect_external_episode_outcome_key,
     _patch_episode_outcome_listener,
@@ -446,6 +448,33 @@ def test_full_vla_pedal_outcome_parser():
     assert args.phase_mode == "always_vla"
     assert args.chunk_exec_steps == 25
     assert args.reset_time_s == 0
+
+
+def test_act_execution_horizon_can_override_loaded_checkpoint():
+    parser = build_parser()
+    args = parser.parse_args([
+        "full",
+        "--initial-source",
+        "vla",
+        "--policy-path",
+        "/tmp/act",
+        "--policy-n-action-steps",
+        "8",
+    ])
+    assert args.policy_n_action_steps == 8
+    assert "--policy.n_action_steps=8" in build_policy_overrides(
+        policy_path=args.policy_path,
+        vla_path=None,
+        rl_token_path=None,
+        n_action_steps=args.policy_n_action_steps,
+    )
+
+
+def test_timing_summary_reports_effective_rate_and_slow_frames():
+    summary = summarize_frame_timings_ms([62.5, 62.5, 100.0], target_fps=16)
+    assert summary["median_ms"] == 62.5
+    assert summary["effective_hz"] == 16.0
+    assert summary["slow_fraction"] == pytest.approx(1 / 3)
 
 
 def test_full_vla_dry_run_accepts_headless_default_episode_success(tmp_path, capsys):

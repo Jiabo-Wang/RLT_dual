@@ -14,6 +14,7 @@ import sys
 import types
 from typing import Any
 
+import numpy as np
 import pytest
 
 
@@ -171,6 +172,39 @@ def test_returned_action_is_what_was_sent(robot):
     # Rounded to the integer the UI register actually took, not the float asked for.
     assert sent["left_ui50"] == 12.0
     assert set(sent) == set(robot.action_features)
+
+
+def test_locked_roll_uses_one_euler_branch_in_controller_and_dataset(robot):
+    sent = robot.send_action(
+        _action(**{"left_roll.pos": 180.0, "right_roll.pos": 179.998})
+    )
+
+    assert sent["left_roll.pos"] == -180.0
+    assert sent["right_roll.pos"] == -180.0
+    assert robot.crp_arm_robot.gp_first[0][1][0][3] == -180.0
+    assert robot.crp_arm_robot.gp_second[0][1][0][3] == -180.0
+
+
+def test_observation_consumes_background_camera_buffer(robot):
+    class FakeCamera:
+        is_connected = True
+
+        def __init__(self):
+            self.timeouts = []
+
+        def async_read(self, timeout_ms):
+            self.timeouts.append(timeout_ms)
+            return np.zeros((2, 3, 3), dtype=np.uint8)
+
+        def read(self):
+            raise AssertionError("synchronous camera read must not be used")
+
+    camera = FakeCamera()
+    robot.cameras = {"top": camera}
+    observation = robot.get_observation()
+
+    assert observation["top"].shape == (2, 3, 3)
+    assert camera.timeouts == [robot.config.camera_async_read_timeout_ms]
 
 
 def test_partial_action_raises_rather_than_freezing_an_arm(robot):

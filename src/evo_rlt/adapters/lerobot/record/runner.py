@@ -626,6 +626,7 @@ def build_default_collect_record_argv(
             vla_path=args.vla_path,
             rl_token_path=args.rl_token_path,
             phase_mode="manual",
+            n_action_steps=getattr(args, "policy_n_action_steps", None),
         ),
         *build_dataset_argv(
             dataset_name=paths.dataset_name,
@@ -787,11 +788,13 @@ def build_segment_policy_argv(args: argparse.Namespace) -> list[str]:
             rl_token_path=args.rl_token_path,
             phase_mode="always_vla",
             chunk_exec_steps=args.chunk_exec_steps,
+            n_action_steps=getattr(args, "policy_n_action_steps", None),
         )
     return build_policy_overrides(
         policy_path=args.policy_path,
         vla_path=args.vla_path,
         rl_token_path=args.rl_token_path,
+        n_action_steps=getattr(args, "policy_n_action_steps", None),
     )
 
 
@@ -914,6 +917,7 @@ def run_full(args: argparse.Namespace) -> None:
                 rl_token_path=args.rl_token_path,
                 phase_mode="manual" if split else args.phase_mode,
                 chunk_exec_steps=args.chunk_exec_steps,
+                n_action_steps=getattr(args, "policy_n_action_steps", None),
             ),
             *build_dataset_argv(
                 dataset_name=paths.dataset_name,
@@ -1009,6 +1013,7 @@ def run_live(args: argparse.Namespace) -> None:
                 rl_token_path=args.rl_token_path,
                 phase_mode=args.phase_mode,
                 chunk_exec_steps=args.chunk_exec_steps,
+                n_action_steps=getattr(args, "policy_n_action_steps", None),
             ),
             "--policy.device=cuda",
             "--device=cuda",

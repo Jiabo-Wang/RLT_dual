@@ -28,9 +28,22 @@ def add_policy_sync_arg(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def add_policy_execution_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--policy-n-action-steps",
+        type=int,
+        default=None,
+        help=(
+            "Override policy.n_action_steps from a loaded checkpoint. For ACT, use 8 "
+            "to replan every 8 control frames instead of executing a whole chunk open-loop."
+        ),
+    )
+
+
 def add_common_record_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--initial-source", choices=["vla", "teleop"], required=True)
     parser.add_argument("--policy-path", default=None)
+    add_policy_execution_args(parser)
     parser.add_argument("--vla-path", default=None)
     parser.add_argument("--rl-token-path", default=None)
     parser.add_argument(
@@ -93,6 +106,7 @@ def add_rtc_args(
 
 def add_default_collect_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--policy-path", required=True)
+    add_policy_execution_args(parser)
     parser.add_argument("--vla-path", default=None)
     parser.add_argument("--rl-token-path", default=None)
     parser.add_argument("--task", default=DEFAULT_COLLECT_TASK)
@@ -206,6 +220,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     live = subparsers.add_parser("live", help="Run policy live on the robot without saving a dataset.")
     live.add_argument("--policy-path", required=True)
+    add_policy_execution_args(live)
     live.add_argument("--eval-script", required=True)
     live.add_argument("--vla-path", default=None)
     live.add_argument("--rl-token-path", default=None)

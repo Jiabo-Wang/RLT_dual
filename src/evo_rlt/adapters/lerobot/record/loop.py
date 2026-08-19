@@ -18,6 +18,7 @@ import json
 import logging
 import time
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any, TypeVar
 
 import numpy as np
@@ -70,6 +71,29 @@ from lerobot.utils.utils import log_say
 from lerobot.utils.visualization_utils import log_rerun_data
 
 T = TypeVar("T")
+
+
+def summarize_frame_timings_ms(total_ms: list[float], target_fps: float) -> dict[str, float]:
+    """Return robust cadence metrics for one control episode."""
+
+    if not total_ms:
+        return {
+            "frames": 0.0,
+            "median_ms": 0.0,
+            "p95_ms": 0.0,
+            "effective_hz": 0.0,
+            "slow_fraction": 0.0,
+        }
+    timings = np.asarray(total_ms, dtype=np.float64)
+    target_period_ms = 1000.0 / float(target_fps)
+    median_ms = float(np.median(timings))
+    return {
+        "frames": float(len(timings)),
+        "median_ms": median_ms,
+        "p95_ms": float(np.percentile(timings, 95)),
+        "effective_hz": 1000.0 / median_ms,
+        "slow_fraction": float(np.mean(timings > target_period_ms * 1.2)),
+    }
 
 
 def _clone_robot_action(action: RobotAction) -> RobotAction:
@@ -846,6 +870,7 @@ def record_loop(
     # Per-frame timing instrumentation -> /tmp/frame_timing.csv
     _perf_fh = open("/tmp/frame_timing.csv", "w")  # noqa: SIM115
     _perf_fh.write("frame,total_ms,obs_ms,infer_ms,send_ms,dataset_ms,sleep_ms\n")
+    _frame_total_ms: list[float] = []
 
     while timestamp < control_time_s:
         start_loop_t = time.perf_counter()
@@ -1077,6 +1102,7 @@ def record_loop(
         dt_s = time.perf_counter() - start_loop_t
         precise_sleep(max(1 / fps - dt_s, 0.0))
         _t_total = (time.perf_counter() - start_loop_t) * 1000
+        _frame_total_ms.append(_t_total)
         _t_sleep = _t_total - dt_s * 1000
         _perf_fh.write(
             f"{_frame_idx},{_t_total:.1f},{_t_obs:.1f},{_t_infer:.1f},"
@@ -1109,7 +1135,25 @@ def record_loop(
     # Close timing file
     if _perf_fh is not None:
         _perf_fh.close()
-        logging.info("[Timing] Wrote %d frame timings to /tmp/frame_timing.csv", _frame_idx)
+        timing_summary = summarize_frame_timings_ms(_frame_total_ms, fps)
+        Path("/tmp/frame_timing_summary.json").write_text(
+            json.dumps(timing_summary, indent=2) + "\n"
+        )
+        log_timing = (
+            logging.warning
+            if timing_summary["effective_hz"] < float(fps) * 0.95
+            or timing_summary["slow_fraction"] > 0.10
+            else logging.info
+        )
+        log_timing(
+            "[Timing] target=%.1fHz actual=%.2fHz median=%.1fms p95=%.1fms "
+            "slow(>1.2x)=%.1f%%; CSV=/tmp/frame_timing.csv",
+            fps,
+            timing_summary["effective_hz"],
+            timing_summary["median_ms"],
+            timing_summary["p95_ms"],
+            timing_summary["slow_fraction"] * 100.0,
+        )
 
     # Close sidecar file
     if _recovery_fh is not None:
