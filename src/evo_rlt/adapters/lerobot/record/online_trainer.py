@@ -331,7 +331,10 @@ class OnlineRLTrainer:
         online_n, offline_n = self._split_batch_sizes()
 
         if self.cfg.use_stratified_sampling:
-            online = self.replay_buffer.sample_stratified(online_n)
+            online = self.replay_buffer.sample_stratified(
+                online_n,
+                allow_resample=getattr(self.cfg, "stratified_allow_resample", False),
+            )
         else:
             online = self.replay_buffer.sample(online_n)
         # Fresh transitions carry their own resolved critical-attempt outcome.
@@ -468,6 +471,9 @@ class OnlineRLTrainer:
                 "utd_ratio": policy_cfg.utd_ratio,
                 "max_updates_per_episode": online_rl_cfg.max_updates_per_episode,
                 "use_stratified_sampling": online_rl_cfg.use_stratified_sampling,
+                "stratified_allow_resample": getattr(
+                    online_rl_cfg, "stratified_allow_resample", False
+                ),
                 "chunk_length": policy_cfg.chunk_length,
                 "action_dim": policy_cfg.action_dim,
                 "actor_hidden_dim": policy_cfg.actor_hidden_dim,

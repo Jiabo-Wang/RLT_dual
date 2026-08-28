@@ -133,6 +133,7 @@ class ReplayBuffer:
         intervention_frac: float = 0.2,
         recent_frac: float = 0.1,
         recent_window: int = 500,
+        allow_resample: bool = False,
     ) -> dict[str, torch.Tensor]:
         """Sample a batch stratified across success/failure/intervention/recent
         transitions so sparse positive-reward terminal transitions (and their
@@ -145,6 +146,24 @@ class ReplayBuffer:
         non-terminal lead-up steps of successful/failed episodes, not only the
         final reward step. Falls back to uniform sampling to fill any shortfall
         when a bucket is too small (e.g. no failures seen yet early in training).
+
+        ``allow_resample`` decides what happens when a bucket holds fewer
+        transitions than its quota, and the two answers trade off real risks:
+
+        - ``False`` (default) draws at most ``len(pool)`` distinct transitions
+          and lets the shortfall path top the batch up uniformly. The single-arm
+          sibling project measured what the alternative costs: 33 takeover
+          transitions (1.7% of its buffer) against a 20% intervention quota meant
+          every batch drew ~51 times from those 33, and the batch BC term jumped
+          3.5x for 36 episodes. Mid-run amplification hit 12x, and 2.4x persisted
+          to the end of the run.
+        - ``True`` restores the original with-replacement fill, which guarantees
+          the quota is met. That matters early in a sparse-reward run, when a
+          single success transition would otherwise be diluted to nothing.
+
+        Neither has been measured on this dual-arm setup yet. The default follows
+        the one that has evidence behind it; flip it if a run starves for
+        reward-bearing samples before the buckets fill.
         """
         n = len(self.buffer)
         if n == 0:
@@ -178,7 +197,9 @@ class ReplayBuffer:
         def _take(pool: list[int], k: int) -> list[int]:
             if not pool or k <= 0:
                 return []
-            return random.sample(pool, k) if len(pool) >= k else random.choices(pool, k=k)
+            if len(pool) >= k:
+                return random.sample(pool, k)
+            return random.choices(pool, k=k) if allow_resample else list(pool)
 
         quotas = {
             "success": round(batch_size * success_frac),

@@ -158,6 +158,8 @@ def build_online_train_argv(args: argparse.Namespace, setup, paths, cal_dir: str
         f"--online_rl.min_warmup_failures={args.min_warmup_failures}",
         f"--online_rl.max_updates_per_episode={args.max_updates_per_episode}",
         f"--online_rl.use_stratified_sampling={'true' if args.stratified_sampling else 'false'}",
+        f"--online_rl.stratified_allow_resample="
+        f"{'true' if args.stratified_allow_resample else 'false'}",
         f"--online_rl.replay_capacity={args.replay_capacity}",
         f"--online_rl.batch_size={args.batch_size}",
         f"--online_rl.offline_batch_fraction={args.offline_batch_fraction}",
@@ -208,7 +210,9 @@ def print_online_train_summary(args: argparse.Namespace, paths) -> None:
         f"actor_unfreeze_ramp_episodes={args.actor_unfreeze_ramp_episodes} batch_size={args.batch_size} "
         f"lr_actor={args.lr_actor} lr_critic={args.lr_critic} utd_ratio={args.utd_ratio} "
         f"max_updates_per_episode={args.max_updates_per_episode} "
-        f"stratified_sampling={args.stratified_sampling} save_every={args.save_every_episodes}"
+        f"stratified_sampling={args.stratified_sampling} "
+        f"allow_resample={args.stratified_allow_resample} "
+        f"save_every={args.save_every_episodes}"
     )
     print(
         f"Actor: hidden_dim={args.actor_hidden_dim} num_layers={args.actor_num_layers} "
@@ -475,7 +479,7 @@ def build_parser() -> argparse.ArgumentParser:
         "than an absolute gap. Enabled by default: an absolute margin stops constraining "
         "the action ordering once Q drifts off the reward scale it was tuned against "
         "(observed at margin=0.1 against a Q that had drifted to ~4.8, where the ranking "
-        "term ordered 2% of its own signal and the Critic ended up scoring the human's "
+        "term ordered 2%% of its own signal and the Critic ended up scoring the human's "
         "successful takeover action BELOW the actor's failing one).",
     )
     parser.add_argument(
@@ -524,8 +528,8 @@ def build_parser() -> argparse.ArgumentParser:
         "signal is (the tanh projection's range is exactly +/-limit, and the deviation "
         "does NOT accumulate across chunks -- the VLA reference returns toward its own "
         "trajectory each chunk rather than following where the arm actually got to). "
-        "Measured on this project at limit=0.2: 34.7% of intervened action elements were "
-        "unreachable and the actor sat saturated against the bound on 46% of the elements "
+        "Measured on this project at limit=0.2: 34.7%% of intervened action elements were "
+        "unreachable and the actor sat saturated against the bound on 46%% of the elements "
         "it was supposed to be learning from. Note this interacts with "
         "--actor-slew-rate-limit: whichever is tighter is the one actually constraining "
         "the robot, and a small limit here makes the slew limit dead code.",
@@ -547,7 +551,7 @@ def build_parser() -> argparse.ArgumentParser:
         "slew*chunk_length above action_clip_delta, or this limit stops bounding "
         "abruptness and starts silently capping total travel below the clip instead "
         "(at 0.02 over 25 steps it capped travel at 0.5 against a clip of 0.7, cutting "
-        "reproducible human corrections from 82% to 65%). For a stronger training-time "
+        "reproducible human corrections from 82%% to 65%%). For a stronger training-time "
         "smoothness constraint use --actor-smoothness-weight, which penalizes rather "
         "than truncates.",
     )
@@ -590,6 +594,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--min-warmup-failures", type=int, default=3,
         help="Warmup also requires at least this many failed episodes in the buffer "
         "(a critic that has only ever seen success, or only failure, can't discriminate).",
+    )
+    parser.add_argument(
+        "--stratified-allow-resample", action=argparse.BooleanOptionalAction, default=False,
+        help="When a stratum holds fewer transitions than its quota, refill it with "
+        "replacement instead of drawing only what it has. Guarantees the quota, but a "
+        "tiny pool then stands in for a fixed share of every batch -- the single-arm "
+        "sibling project measured 33 takeover transitions filling a 20%% quota, which "
+        "tripled the batch BC term for 36 episodes. Default off.",
     )
     parser.add_argument(
         "--stratified-sampling", action=argparse.BooleanOptionalAction, default=True,

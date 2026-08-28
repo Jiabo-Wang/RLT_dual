@@ -367,6 +367,12 @@ class OnlineRLConfig:
     # from a mostly-zero-reward buffer can end up with few or no positive
     # examples.
     use_stratified_sampling: bool = True
+    # What a stratum does when it holds fewer transitions than its quota.
+    # False draws only what it has and lets the shortfall fill uniformly;
+    # True refills with replacement, which guarantees the quota but let the
+    # single-arm sibling project's 33 takeover transitions stand in for 20% of
+    # every batch (BC term 3.5x for 36 episodes). See ReplayBuffer.
+    stratified_allow_resample: bool = False
     # Directory to save periodic online-training checkpoints. Required when enable=true.
     save_dir: str | None = None
     save_every_episodes: int = 5

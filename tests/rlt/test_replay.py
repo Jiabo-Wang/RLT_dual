@@ -150,36 +150,71 @@ class TestOutcomeLabels:
 
 
 class TestStratifiedSampling:
-    def test_falls_back_to_uniform_when_buffer_is_small(self):
-        buf = ReplayBuffer(capacity=100)
-        for _ in range(3):
-            buf.add(_make_episode_transition(0))
-        batch = buf.sample_stratified(8)
-        assert batch["state_vec"].shape[0] == 8  # backfilled from the 'other' bucket
+    @staticmethod
+    def _tiny_pool_buffer() -> ReplayBuffer:
+        """500 plain transitions plus one success, one failure, five interventions.
 
-    def test_prefers_success_failure_intervention_buckets_when_available(self):
+        The three interesting buckets are far smaller than a 40/30/20% quota on a
+        100-batch, which is exactly the regime allow_resample governs.
+        """
         buf = ReplayBuffer(capacity=1000)
-        # A large pool of plain (non-terminal, non-intervention, unresolved-episode)
-        # transitions that should be under-represented relative to uniform sampling.
         for eid in range(50, 550):
             buf.add(_make_episode_transition(eid))
-        # A single success episode, a single failure episode, a few intervention
-        # transitions -- small pools that stratified sampling should still pull from.
         buf.add(_make_episode_transition(1, done=True, success=True))
         buf.add(_make_episode_transition(2, done=True, success=False))
         for _ in range(5):
             buf.add(_make_episode_transition(3, intervention=True))
+        return buf
 
+    @staticmethod
+    def _count_successes(batch) -> float:
+        return (batch["done"] * (batch["reward_seq"].sum(dim=-1) > 0).float()).sum().item()
+
+    def test_backfills_from_other_bucket_when_buffer_is_small(self):
+        buf = ReplayBuffer(capacity=100)
+        for _ in range(3):
+            buf.add(_make_episode_transition(0))
+        # Only 3 transitions exist, so without resampling the batch comes up short.
+        # (It can still exceed 3: a transition counts toward both the 'recent' and
+        # 'other' buckets, and cross-bucket overlap was always allowed.)
+        assert buf.sample_stratified(8)["state_vec"].shape[0] < 8
+        # With resampling the quota is filled by repeating them.
+        assert buf.sample_stratified(8, allow_resample=True)["state_vec"].shape[0] == 8
+
+    def test_allow_resample_fills_a_tiny_quota_by_repeating(self):
+        buf = self._tiny_pool_buffer()
+        batch = buf.sample_stratified(
+            100, success_frac=0.4, failure_frac=0.3, intervention_frac=0.2,
+            recent_frac=0.1, allow_resample=True,
+        )
+        assert batch["state_vec"].shape[0] == 100
+        # The single success transition is repeated up to its 40% quota.
+        assert self._count_successes(batch) >= 30
+
+    def test_default_draws_each_bucket_at_most_once(self):
+        buf = self._tiny_pool_buffer()
         batch = buf.sample_stratified(
             100, success_frac=0.4, failure_frac=0.3, intervention_frac=0.2, recent_frac=0.1,
         )
+        # Still a full batch -- the shortfall path tops it up uniformly.
         assert batch["state_vec"].shape[0] == 100
-        # With only one success/failure transition each, requesting 40%/30% of a
-        # 100-batch must be satisfied by resampling those single transitions
-        # with replacement -- i.e. stratified sampling must not silently drop
-        # the quota just because the pool is tiny.
-        successes = (batch["done"] * (batch["reward_seq"].sum(dim=-1) > 0).float()).sum().item()
-        assert successes >= 30  # allow slack for the 'recent'/backfill overlap
+        # But the one success transition appears once, not 40 times: a tiny pool
+        # must not stand in for a fixed share of every batch. See ReplayBuffer's
+        # docstring for the amplification this avoids.
+        assert self._count_successes(batch) <= 2
+
+    def test_full_buckets_still_meet_their_quota_without_resampling(self):
+        buf = ReplayBuffer(capacity=2000)
+        for eid in range(100, 400):
+            buf.add(_make_episode_transition(eid))
+        for eid in range(400, 500):
+            buf.add(_make_episode_transition(eid, done=True, success=True))
+        batch = buf.sample_stratified(
+            100, success_frac=0.4, failure_frac=0.0, intervention_frac=0.0, recent_frac=0.0,
+        )
+        assert batch["state_vec"].shape[0] == 100
+        # 100 success transitions comfortably cover a 40-slot quota.
+        assert self._count_successes(batch) >= 40
 
     def test_batch_keys_match_uniform_sample(self):
         buf = ReplayBuffer(capacity=100)
