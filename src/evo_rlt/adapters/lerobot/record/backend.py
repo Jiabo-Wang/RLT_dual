@@ -447,6 +447,10 @@ class RecordConfig:
     # the rlt wo_prefix recorder.
     teleop_r_key_episodes: bool = False
     # Whether to capture episode-level success/failure labels from keyboard.
+    # Drive the arms back to their recorded home_tcp when an episode ends, before
+    # the reset window. Off by default: this is the only setting here that makes the
+    # robot move on its own, and a manifest without home_tcp cannot honour it anyway.
+    go_home_after_episode: bool = False
     enable_episode_outcome_labeling: bool = False
     # Keyboard key to mark the current episode as success and end it.
     episode_success_key: str = "s"
@@ -1292,7 +1296,32 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                 and (next_episode_needed or events["rerecord_episode"])
             )
 
+        def _go_home_if_requested() -> None:
+            """Send the arms home once the episode is over.
+
+            Placed before the reset-window check rather than inside it so the arms
+            return on every episode, including the ones that skip the window -- and
+            before it rather than after, so the operator's reset time is spent
+            repositioning the workpiece instead of waiting on the robot.
+            """
+            if not cfg.go_home_after_episode:
+                return
+            go_home = getattr(robot, "go_home", None)
+            if go_home is None:
+                logging.warning(
+                    "go_home_after_episode is set but %s has no go_home(); skipping.",
+                    robot.name,
+                )
+                return
+            try:
+                go_home()
+            except Exception as exc:
+                # Never let the return trip abort a session that has already recorded
+                # its episode -- the operator can always reposition by hand.
+                logging.warning("go-home failed (%s); continuing.", exc)
+
         def _run_reset_loop_if_needed(recorded_episodes: int) -> None:
+            _go_home_if_requested()
             if not _should_run_reset_loop(recorded_episodes):
                 return
             log_say("Reset the environment", cfg.play_sounds)

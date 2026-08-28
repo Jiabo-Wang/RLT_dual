@@ -157,6 +157,7 @@ def build_online_train_argv(args: argparse.Namespace, setup, paths, cal_dir: str
         f"--online_rl.min_warmup_successes={args.min_warmup_successes}",
         f"--online_rl.min_warmup_failures={args.min_warmup_failures}",
         f"--online_rl.max_updates_per_episode={args.max_updates_per_episode}",
+        f"--go_home_after_episode={'true' if args.go_home_after_episode else 'false'}",
         f"--online_rl.use_stratified_sampling={'true' if args.stratified_sampling else 'false'}",
         f"--online_rl.stratified_allow_resample="
         f"{'true' if args.stratified_allow_resample else 'false'}",
@@ -597,6 +598,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--min-warmup-failures", type=int, default=3,
         help="Warmup also requires at least this many failed episodes in the buffer "
         "(a critic that has only ever seen success, or only failure, can't discriminate).",
+    )
+    parser.add_argument(
+        "--go-home-after-episode", action=argparse.BooleanOptionalAction, default=False,
+        help="Drive the arms back to the manifest's home_tcp when an episode ends, "
+        "before the reset window. Record that pose first with `evo-rlt-crp-set-home`; "
+        "without it this does nothing. Off by default -- it is the only option here "
+        "that moves the robot on its own.",
     )
     parser.add_argument(
         "--stratified-allow-resample", action=argparse.BooleanOptionalAction, default=False,

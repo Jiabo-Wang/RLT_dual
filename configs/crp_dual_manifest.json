@@ -25,7 +25,15 @@
       "kind": "crp",
       "ip": "192.168.0.100",
       "gp_index": 10,
-      "gripper_init_ui50": 116
+      "gripper_init_ui50": 116,
+      "home_tcp": [
+        494.327,
+        104.4,
+        298.07,
+        -179.999,
+        0.0,
+        90.0
+      ]
     },
     {
       "alias": "right_follower",
@@ -33,7 +41,15 @@
       "kind": "crp",
       "ip": "192.168.0.101",
       "gp_index": 20,
-      "gripper_init_ui50": 223
+      "gripper_init_ui50": 223,
+      "home_tcp": [
+        494.292,
+        104.429,
+        298.083,
+        -179.995,
+        -0.003,
+        90.003
+      ]
     }
   ],
   "cameras": [

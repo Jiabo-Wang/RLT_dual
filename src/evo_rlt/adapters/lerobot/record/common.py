@@ -397,6 +397,18 @@ def build_robot_argv(
                 if "gripper_init_ui50" in right
                 else []
             ),
+            # Recorded by evo-rlt-crp-set-home. Absent from a manifest that never ran
+            # it, in which case go-home is a no-op and behaviour is unchanged.
+            *(
+                [f"--robot.home_tcp_left={json.dumps(left['home_tcp'])}"]
+                if "home_tcp" in left
+                else []
+            ),
+            *(
+                [f"--robot.home_tcp_right={json.dumps(right['home_tcp'])}"]
+                if "home_tcp" in right
+                else []
+            ),
             f"--robot.cameras={json.dumps(left_cameras)}",
         ]
 

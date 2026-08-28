@@ -771,6 +771,51 @@ class CRPArmDual(Robot):
             raise RuntimeError(f"read_end_pose_user_second returned len {len(raw)}, expected 6")
         return [float(v) for v in raw]
 
+    def go_home(self) -> bool:
+        """Command both arms to their recorded ``home_tcp``. Returns True if both took.
+
+        This is the one call here that *moves* the robot on its own, so it is only
+        ever reached from an explicit opt-in and never during a chunk: the caller
+        must have ended the episode first. A missing home_tcp is a no-op rather
+        than an error -- a manifest that never ran ``evo-rlt-crp-set-home`` should
+        simply behave the way it did before this existed.
+
+        The pose is repeated ``gp_trajectory_group_size`` times for the same reason
+        seed_gp_registers_from_current_tcp does it: the controller consumes GP as a
+        group and silently ignores a partially written one.
+        """
+        if not self._sdk_connected:
+            raise DeviceNotConnectedError(f"{self} is not connected.")
+
+        group = max(1, int(self.config.gp_trajectory_group_size))
+        results: list[bool] = []
+        for label, tcp, register, send in (
+            ("left", self.config.home_tcp_left, self.config.gp_register_left,
+             self.send_GPs_first),
+            ("right", self.config.home_tcp_right, self.config.gp_register_right,
+             self.send_GPs_second),
+        ):
+            if not tcp:
+                logger.info("%s go-home: no home_tcp for %s, skipping.", self, label)
+                continue
+            if len(tcp) != 6:
+                logger.warning(
+                    "%s go-home: home_tcp for %s has %d values, expected 6 "
+                    "[x, y, z, roll, pitch, yaw]; skipping.", self, label, len(tcp),
+                )
+                results.append(False)
+                continue
+            pose = [float(v) for v in tcp]
+            ok = bool(send(int(register), [list(pose) for _ in range(group)]))
+            if ok:
+                logger.info("%s go-home: %s -> (%.1f, %.1f, %.1f)",
+                            self, label, pose[0], pose[1], pose[2])
+            else:
+                logger.warning("%s go-home: set_GPs(GP%s) rejected for %s.",
+                               self, register, label)
+            results.append(ok)
+        return bool(results) and all(results)
+
     def send_GPs_first(self, start_index: int, gp_points: list[list[float]]) -> bool:
         with self._sdk_lock:
             return bool(self.crp_arm_robot.set_GPs(start_index, gp_points))

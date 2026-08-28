@@ -73,6 +73,15 @@ class CRPArmDualConfig(RobotConfig):
     # controller services regardless of any program), so the write was never the
     # cause.
     init_gp_on_connect: bool = True
+
+    # Go-home target per arm, as a 6-element TCP [x, y, z, roll, pitch, yaw] in the
+    # same user frame read_end_pose_user() reports. Recorded by
+    # ``evo-rlt-crp-set-home`` from wherever the arms are standing, so it is a pose
+    # the arms demonstrably reach rather than a joint zero -- the CRP's J6 in
+    # particular raises a speed fault when driven to zero from an arbitrary pose
+    # (README_crp_dual.md, section 9). None disables go-home for that arm.
+    home_tcp_left: list[float] | None = None
+    home_tcp_right: list[float] | None = None
     # Opening (UI50, 0-255, 0 closed) to command each gripper before a run starts.
     # ``None`` leaves the gripper where it is, which costs the first observation.
     #

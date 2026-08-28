@@ -54,6 +54,7 @@ evo-rlt-online-train = "evo_rlt.adapters.lerobot.record.online_cli:main"
 evo-rlt-prune-online-state = "evo_rlt.adapters.lerobot.record.prune_state_cli:main"
 evo-rlt-crp-teleop = "evo_rlt.adapters.crp.cli_teleop:main"
 evo-rlt-crp-replay = "evo_rlt.adapters.crp.replay:main"
+evo-rlt-crp-set-home = "evo_rlt.adapters.crp.set_home:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
