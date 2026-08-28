@@ -8,7 +8,11 @@ real: a --config relative path that only resolves from one of them, a stale
 """
 
 import os
+import sys
 from pathlib import Path
+
+# diagnostics/ is a script directory, not a package on the path.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import pytest
 
@@ -108,3 +112,53 @@ class TestCudaLibraryShadowing:
     def test_nonexistent_entries_are_ignored(self, monkeypatch):
         monkeypatch.setenv("LD_LIBRARY_PATH", os.pathsep.join(["/no/such/dir", ""]))
         assert warn_on_shadowing_cuda_libs() == []
+
+
+class TestArmSubnetCheck:
+    """A ping alone cannot tell "the arm answered" from "something else did".
+
+    This host's WiFi carries 192.168.5.49/21, wide enough to contain
+    192.168.0.0/24, so with the wired port down the kernel routes the arms'
+    addresses over WiFi and an unrelated device there answers. Measured: .100
+    replied from 18:93:41:59:c4:b9 over wlp13s0 while the arm's own ARP entry on
+    the wired interface was INCOMPLETE.
+    """
+
+    @staticmethod
+    def _ip_addr_output(entries):
+        # Shape of `ip -o -4 addr show`: index, name, family, cidr, ...
+        return "\n".join(
+            f"{i + 1}: {name}    inet {cidr} brd x scope global {name}"
+            for i, (name, cidr) in enumerate(entries)
+        )
+
+    def _patch(self, monkeypatch, entries):
+        import subprocess as sp
+
+        from diagnostics import pi05_preflight as pf
+
+        def fake_run(cmd, *a, **kw):
+            assert cmd[:4] == ["ip", "-o", "-4", "addr"]
+            return sp.CompletedProcess(cmd, 0, stdout=self._ip_addr_output(entries), stderr="")
+
+        monkeypatch.setattr(pf.subprocess, "run", fake_run)
+        return pf
+
+    def test_a_wide_mask_containing_the_subnet_is_rejected(self, monkeypatch):
+        pf = self._patch(monkeypatch, [("wlp13s0", "192.168.5.49/21")])
+        assert pf._interface_on_subnet("192.168.0.100") is None
+
+    def test_an_interface_on_the_actual_subnet_is_accepted(self, monkeypatch):
+        pf = self._patch(monkeypatch, [("enp12s0", "192.168.0.50/24")])
+        assert pf._interface_on_subnet("192.168.0.100") == "enp12s0"
+
+    def test_the_wired_interface_wins_over_the_wide_wifi_route(self, monkeypatch):
+        pf = self._patch(
+            monkeypatch,
+            [("wlp13s0", "192.168.5.49/21"), ("enp12s0", "192.168.0.50/24")],
+        )
+        assert pf._interface_on_subnet("192.168.0.100") == "enp12s0"
+
+    def test_an_unrelated_subnet_is_rejected(self, monkeypatch):
+        pf = self._patch(monkeypatch, [("enp12s0", "10.0.0.5/24")])
+        assert pf._interface_on_subnet("192.168.0.100") is None

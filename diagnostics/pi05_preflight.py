@@ -65,8 +65,38 @@ def check_cameras(manifest: Path) -> list[str]:
     return problems
 
 
+def _interface_on_subnet(ip: str) -> str | None:
+    """The interface holding an address in ``ip``'s own /24, if any.
+
+    A plain ping is not enough here. This host's WiFi carries 192.168.5.49/21,
+    a mask wide enough to swallow 192.168.0.0/24, so the kernel routes the arms'
+    addresses out over WiFi and an unrelated device answering there reads as
+    "arm reachable" while the wired port is down. Measured on 2026-08-28:
+    192.168.0.100 replied from 18:93:41:59:c4:b9 over wlp13s0 while the arm's
+    own ARP entry on enp12s0 was INCOMPLETE.
+    """
+    prefix = ip.rsplit(".", 1)[0] + "."
+    out = subprocess.run(
+        ["ip", "-o", "-4", "addr", "show"], capture_output=True, text=True
+    ).stdout
+    for line in out.splitlines():
+        fields = line.split()
+        if len(fields) < 4:
+            continue
+        name, cidr = fields[1], fields[3]
+        addr, _, mask = cidr.partition("/")
+        # Only an interface configured *on that /24* counts; a /21 that merely
+        # contains it is the false positive this exists to reject.
+        if addr.startswith(prefix) and int(mask or 32) >= 24:
+            return name
+    return None
+
+
 def check_arms(manifest: Path) -> list[str]:
-    """Ping every CRP follower the manifest names. Read-only -- no SDK session."""
+    """Ping every CRP follower, bound to the interface on its subnet.
+
+    Read-only -- no SDK session, so it is safe with the arms powered off.
+    """
     arms = [
         a for a in json.loads(manifest.read_text())["arms"]
         if a.get("type") == "follower" and a.get("ip")
@@ -74,12 +104,21 @@ def check_arms(manifest: Path) -> list[str]:
     problems = []
     for arm in arms:
         ip, alias = arm["ip"], arm["alias"]
+        iface = _interface_on_subnet(ip)
+        if iface is None:
+            print(f"  臂 {alias:16s} {ip:16s} -> 本机没有接口在这个网段上")
+            problems.append(
+                f"臂 {alias} ({ip}): 没有任何接口配置在 {ip.rsplit('.', 1)[0]}.0/24 上。"
+                f"检查有线口是否插好（cat /sys/class/net/enp12s0/carrier 应为 1）"
+            )
+            continue
         ok = subprocess.run(
-            ["ping", "-c2", "-W2", ip], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            ["ping", "-c2", "-W2", "-I", iface, ip],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         ).returncode == 0
-        print(f"  臂 {alias:16s} {ip:16s} -> {'通' if ok else '不通'}")
+        print(f"  臂 {alias:16s} {ip:16s} -> {'通' if ok else '不通'}  (经 {iface})")
         if not ok:
-            problems.append(f"臂 {alias} ({ip}) ping 不通 —— 检查上电、网线和 enp12s0")
+            problems.append(f"臂 {alias} ({ip}) 经 {iface} 不通 —— 检查上电与网线")
     return problems
 
 
