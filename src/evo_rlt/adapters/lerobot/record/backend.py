@@ -1119,15 +1119,20 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
         # unbind s/f so the user cannot accidentally end an episode out of
         # the r/u outcome state machine.
         bind_ep_outcome_keys = cfg.enable_episode_outcome_labeling and not teleop_r_key_mode
-        # While a policy is driving, the failure key stays unbound: an episode that went
-        # wrong is re-recorded with the left arrow rather than labelled. Success (s) and
-        # the arrows still work, so nothing else about ending an episode changes.
+        # Plain policy-driven recording leaves the failure key unbound: that is an
+        # evaluation rollout, and an episode that went wrong is re-recorded with the
+        # left arrow rather than labelled.
         #
-        # This does remove the only way to *label* a failure, which the online RL warmup
-        # counts (OnlineRLConfig.min_warmup_failures). A run that needs failures has to
-        # get them another way, or that threshold has to come down; otherwise warmup
-        # never completes.
-        bind_failure_key = policy is None
+        # RLT recording is the opposite case. Failures are training data there, not
+        # noise -- the warmup gate literally counts them
+        # (OnlineRLConfig.min_warmup_failures) -- so discarding a bad episode throws
+        # away exactly what the critic needs. `u` already flushes a failed *critical
+        # phase* into the replay buffer, but it deliberately leaves the episode
+        # recording, so without `f` there is no way to end a failed episode as a
+        # failure: `s` would label it a success and the only alternative is waiting
+        # out episode_time_s. Binding it also makes go-home reachable on failure,
+        # since that fires when the episode ends.
+        bind_failure_key = policy is None or rlt_active
         listener, events = init_keyboard_listener(
             intervention_toggle_key=cfg.intervention_toggle_key if policy is not None else None,
             left_intervention_key=cfg.left_intervention_key if rlt_hil_mode else None,
