@@ -108,8 +108,14 @@ def build_pi05_policy(
     tokenizer_path: str | None = None,
 ):
     from evo_rlt.adapters.lerobot.pi05_adapter import Pi05VLAAdapter
+    from evo_rlt.adapters.lerobot.pi05_low_mem_load import install as install_pi05_low_mem_loader
     from evo_rlt.core.policy import RLTPolicy
     import torch
+
+    # Pi05VLAAdapter goes through PI05Policy.from_pretrained, whose stock path
+    # fp32-random-inits 4.14B params before overwriting them from the checkpoint:
+    # a 23.7 GiB transient and 116 s per load. Same fix the deploy path installs.
+    install_pi05_low_mem_loader()
 
     vla = Pi05VLAAdapter(
         model_path=model_path,

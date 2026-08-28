@@ -25,13 +25,19 @@ SCRIPT_ROOT = Path(__file__).resolve().parent
 if str(SCRIPT_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPT_ROOT))
 
-from evo_rlt.cli.common import build_pi05_policy, configure_logging, load_training_config
+from evo_rlt.cli.common import (
+    assert_config_matches_dataset,
+    build_pi05_policy,
+    configure_logging,
+    load_training_config,
+)
 
 logger = configure_logging(__name__)
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--config", default=None, help="Path to an RLT YAML config.")
     parser.add_argument("--model-path", default="lerobot/pi05_base")
     parser.add_argument("--demo-dataset-path", default=None)
     parser.add_argument("--output", required=True, help="Output .pt path")
@@ -50,7 +56,12 @@ def main() -> None:
     args = parse_args()
     from evo_rlt.adapters.lerobot.demo_loader import make_demo_loader
 
-    config = load_training_config(None)
+    # Was hardcoded to None, so this CLI always built the adapter against the
+    # SO101 defaults (12 dims, left_wrist/right_wrist/right_front) no matter
+    # which robot's dataset it was pointed at.
+    config = load_training_config(args.config)
+    if args.demo_dataset_path:
+        assert_config_matches_dataset(config, args.demo_dataset_path)
     cams = args.active_cameras.split(",") if args.active_cameras else None
     policy = build_pi05_policy(
         config=config,
