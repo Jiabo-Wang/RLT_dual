@@ -30,6 +30,7 @@ from evo_rlt.cli.common import (
     build_pi05_policy,
     configure_logging,
     load_training_config,
+    resolve_artifact_path,
 )
 
 logger = configure_logging(__name__)
@@ -61,7 +62,13 @@ def main() -> None:
     # which robot's dataset it was pointed at.
     config = load_training_config(args.config)
     if args.demo_dataset_path:
+        args.demo_dataset_path = str(
+            resolve_artifact_path(args.demo_dataset_path, must_exist=True, label="dataset")
+        )
         assert_config_matches_dataset(config, args.demo_dataset_path)
+    # train_rl_token --norm-stats reads this back; log the absolute path so the
+    # two commands can be checked against each other across workspaces.
+    args.output = str(resolve_artifact_path(args.output, label="output"))
     cams = args.active_cameras.split(",") if args.active_cameras else None
     policy = build_pi05_policy(
         config=config,

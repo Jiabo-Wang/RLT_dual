@@ -5,8 +5,12 @@ import sys
 from pathlib import Path
 
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-SRC_ROOT = REPO_ROOT / "src"
+# .../src/evo_rlt/cli/common.py -> parents[1]=evo_rlt, [2]=src, [3]=repo root.
+# These were parents[2] and REPO_ROOT/"src", i.e. the src dir and a non-existent
+# src/src; the sys.path insert below was a no-op so nothing ever noticed.
+_PKG_ROOT = Path(__file__).resolve().parents[1]      # .../src/evo_rlt
+SRC_ROOT = _PKG_ROOT.parent                          # .../src
+REPO_ROOT = SRC_ROOT.parent                          # .../RLT_dual (editable installs)
 DEFAULT_CAMERAS = ["left_wrist", "right_wrist", "right_front"]
 DEFAULT_ACTION_DIM = 12
 DEFAULT_PROPRIO_DIM = 12
@@ -20,6 +24,142 @@ if str(SRC_ROOT) not in sys.path:
 def configure_logging(name: str) -> logging.Logger:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     return logging.getLogger(name)
+
+
+# Derived from the package itself, so it is right for editable and site-packages
+# installs alike (pyproject ships core/configs/*.yaml as package data).
+PACKAGED_CONFIG_DIR = _PKG_ROOT / "core" / "configs"
+
+_log = logging.getLogger(__name__)
+
+
+def resolve_config_path(config_path: str | Path) -> Path:
+    """Find a --config file without depending on the caller's cwd.
+
+    Two workspaces coexist on the training box (``~/crp-rlt`` holds the VLA run,
+    ``~/RLT_dual`` holds this package), so ``--config src/evo_rlt/core/configs/x.yaml``
+    resolves or not purely by which one you happened to cd into. Tries, in order:
+    the path as given, the same path under the repo root, and the bare filename
+    under the packaged config directory -- so ``--config crp_dual_rlt.yaml`` works
+    from anywhere.
+    """
+    given = Path(config_path).expanduser()
+    candidates = [given]
+    if not given.is_absolute():
+        candidates.append(REPO_ROOT / given)
+    candidates.append(PACKAGED_CONFIG_DIR / given.name)
+
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate.resolve()
+
+    available = sorted(p.name for p in PACKAGED_CONFIG_DIR.glob("*.yaml"))
+    raise FileNotFoundError(
+        f"Config {config_path!r} not found. Looked in:\n  "
+        + "\n  ".join(str(c) for c in candidates)
+        + f"\nAvailable packaged configs: {', '.join(available) or '(none)'}"
+        + "\nA bare filename (e.g. --config crp_dual_rlt.yaml) resolves regardless of cwd."
+    )
+
+
+def resolve_model_path(model_path: str) -> str:
+    """Disambiguate a local checkpoint directory from a Hugging Face repo id.
+
+    A missing local path used to reach transformers, which treated it as a repo
+    id and reported ``Repo id must be in the form 'repo_name' or
+    'namespace/repo_name'`` -- an error about naming that says nothing about the
+    directory being absent. Anything that looks like a filesystem path is
+    checked here instead; bare ``org/name`` ids pass through untouched.
+    """
+    looks_local = (
+        model_path.startswith(("~", ".", "/"))
+        or Path(model_path).expanduser().exists()
+        or (model_path.count("/") > 1)
+    )
+    if not looks_local:
+        return model_path
+
+    resolved = Path(model_path).expanduser()
+    if resolved.is_dir():
+        return str(resolved.resolve())
+
+    hint = ""
+    parent = resolved.parent
+    while parent != parent.parent and not parent.is_dir():
+        parent = parent.parent
+    if parent.is_dir():
+        siblings = sorted(p.name for p in parent.iterdir() if p.is_dir())[:12]
+        if siblings:
+            hint = f"\n  {parent} contains: {', '.join(siblings)}"
+    raise FileNotFoundError(
+        f"--model-path {model_path!r} looks like a local checkpoint directory but does "
+        f"not exist.\n  Resolved to: {resolved}{hint}\n"
+        "  A pi0.5 checkpoint directory holds config.json + model.safetensors.\n"
+        "  (Pass a bare Hugging Face id such as lerobot/pi05_base to load from the Hub.)"
+    )
+
+
+def resolve_artifact_path(path: str | Path, *, must_exist: bool = False, label: str = "path") -> Path:
+    """Make an artifact path absolute and log it, so cwd never silently decides it.
+
+    ``--output outputs/crp_token_std.pt`` written from ``~/crp-rlt`` and read back
+    from ``~/RLT_dual`` are two different files, and nothing complained.
+    """
+    resolved = Path(path).expanduser().resolve()
+    if must_exist and not resolved.exists():
+        raise FileNotFoundError(
+            f"{label} {str(path)!r} does not exist.\n  Resolved to: {resolved}\n"
+            "  Relative paths resolve against the current directory -- pass an absolute "
+            "path if the file was produced from a different workspace."
+        )
+    _log.info("%s -> %s", label, resolved)
+    return resolved
+
+
+def warn_on_shadowing_cuda_libs() -> list[str]:
+    """Warn when LD_LIBRARY_PATH puts a system CUDA ahead of the one torch ships.
+
+    The failure this catches surfaces far from its cause: a system libcublas
+    loaded in place of the bundled one runs until the first batched GEMM and
+    then raises ``CUBLAS_STATUS_INVALID_VALUE``, which reads like a shape bug.
+    Clearing LD_LIBRARY_PATH for the launch is the usual fix. Returns the
+    offending directories (empty when clean) rather than raising -- some setups
+    legitimately need a system CUDA.
+    """
+    import os
+
+    raw = os.environ.get("LD_LIBRARY_PATH", "")
+    if not raw:
+        return []
+
+    try:
+        import torch
+
+        bundled_root = Path(torch.__file__).resolve().parent.parent / "nvidia"
+    except Exception:  # torch not importable yet; nothing to compare against
+        return []
+
+    offenders = []
+    for entry in raw.split(os.pathsep):
+        if not entry:
+            continue
+        directory = Path(entry).expanduser()
+        if not directory.is_dir():
+            continue
+        if bundled_root in directory.parents or directory == bundled_root:
+            continue  # this IS torch's own bundle
+        if any(directory.glob("libcublas.so*")) or any(directory.glob("libcudart.so*")):
+            offenders.append(str(directory))
+
+    if offenders:
+        _log.warning(
+            "LD_LIBRARY_PATH contains CUDA libraries that may shadow the ones torch "
+            "ships: %s. If this run dies with CUBLAS_STATUS_INVALID_VALUE inside a "
+            "GEMM, relaunch with an empty LD_LIBRARY_PATH:\n"
+            "    LD_LIBRARY_PATH= python -m evo_rlt.cli...",
+            ", ".join(offenders),
+        )
+    return offenders
 
 
 # Fields a --config file is allowed to set. Historically these five were
@@ -48,10 +188,12 @@ def load_training_config(config_path: str | None):
         config.cameras = list(DEFAULT_CAMERAS)
         return config
 
-    config = RLTConfig.from_yaml(config_path)
+    resolved = resolve_config_path(config_path)
+    _log.info("config -> %s", resolved)
+    config = RLTConfig.from_yaml(resolved)
     if config.chunk_length >= config.vla_horizon:
         raise ValueError(
-            f"{config_path}: chunk_length ({config.chunk_length}) must be smaller than "
+            f"{resolved}: chunk_length ({config.chunk_length}) must be smaller than "
             f"vla_horizon ({config.vla_horizon}) -- the RL chunk is a prefix of the VLA "
             "horizon, and the paper states C < H."
         )
@@ -111,6 +253,13 @@ def build_pi05_policy(
     from evo_rlt.adapters.lerobot.pi05_low_mem_load import install as install_pi05_low_mem_loader
     from evo_rlt.core.policy import RLTPolicy
     import torch
+
+    # A missing local checkpoint reaches transformers as a repo id and comes back
+    # as "Repo id must be in the form ...", which points at naming rather than at
+    # the absent directory. Fail here with the path that was actually checked.
+    model_path = resolve_model_path(model_path)
+    _log.info("model -> %s", model_path)
+    warn_on_shadowing_cuda_libs()
 
     # Pi05VLAAdapter goes through PI05Policy.from_pretrained, whose stock path
     # fp32-random-inits 4.14B params before overwriting them from the checkpoint:

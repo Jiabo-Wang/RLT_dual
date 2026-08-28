@@ -26,7 +26,7 @@
 | 1 | 演示采集 | ✅ | 622 ep / 220,967 帧 @ 16 fps，`crp_arm_dual` |
 | 2 | VLA 微调（SFT） | ✅ | pi0.5 全参 30k 步，loss 0.0189，见 `docs/pi05_vla_ft_report/` |
 | — | VLA 部署验证 | ✅ | 显存 8.71 GiB，重规划 178 ms（预算 3.12 s） |
-| 3 | **RL-token 离线训练** | ❌ **下一步** | `outputs/` 下无产物 |
+| 3 | **RL-token 离线训练** | 🔄 **进行中** | 两台机器各跑通 20 步 smoke test；A6000 上开训 |
 | 4 | warmup | ❌ | 代码有，未跑 |
 | 5 | critic-only | ❌ | 代码有，未跑 |
 | 6 | 在线强化 | ❌ | 代码有，未跑 |
@@ -92,8 +92,23 @@ VLA 参考**，理由写在 `online_collector.py` 的注释里：actor 是残差
 
 - **新增 `configs/crp_dual_rlt.yaml`**，每个值都注明来源（实测 / 论文）。
 
-- 顺带修了 `online_cli.py` 四个 help 字符串里的裸 `%`，它让
-  `evo-rlt-online-train --help` 直接抛 `TypeError` 崩掉。
+- **关键路径不再依赖 cwd。** A6000 上两个 workspace 并存（`~/crp-rlt` 放 VLA 训练，
+  `~/RLT_dual` 放本包），暴露了三处：`--config` 的相对路径只在其中一个目录下成立；
+  `--model-path` 指向已不存在的 checkpoint 时被 transformers 当成 HF repo id，报
+  `Repo id must be in the form ...` 这种完全不提"目录不存在"的错；
+  `--output outputs/x.pt` 与 `--norm-stats outputs/x.pt` 在两个目录下是两个文件，
+  静默退化成不加权训练。分别对应 `resolve_config_path()`（原样 → 仓库根 → 包内配置目录）、
+  `resolve_model_path()`（像本地路径就先查存在性，报错列出父目录内容）、
+  `resolve_artifact_path()`（绝对化 + 打日志，必需输入不存在直接报错）。
+
+- **`LD_LIBRARY_PATH` 里的系统 CUDA 会顶掉 torch 自带的那份**，直到第一个批量 GEMM 才
+  炸成 `CUBLAS_STATUS_INVALID_VALUE`，看起来像 shape bug。`build_pi05_policy` 现在加载
+  模型前先检查并 warning（只警告不拦截，有些环境确实需要系统 CUDA）。
+
+- 顺带修了两个既有问题：`cli/common.py` 的 `REPO_ROOT` 算的是 `.../src` 而不是仓库根
+  （`SRC_ROOT` 因此成了不存在的 `src/src`，一直没发作是因为那个 `sys.path.insert` 是多余的）；
+  `online_cli.py` 四个 help 字符串里的裸 `%` 让 `evo-rlt-online-train --help` 直接抛
+  `TypeError` 崩掉。
 
 ---
 
@@ -147,15 +162,19 @@ rlt-single 在 30 fps 上遇到同一问题（0.99 只有 2.3 s），改用 0.99
    ```bash
    conda activate crp_rlt_small && cd ~/RLT_dual
    evo-rlt-train-rl-token \
-     --model-path pretrained_model \
-     --demo-dataset-path data/crp_dual/crp_rlt_dataset \
-     --config src/evo_rlt/core/configs/crp_dual_rlt.yaml \
-     --output-dir outputs/crp_rl_token
+     --model-path "$PWD/pretrained_model" \
+     --demo-dataset-path "$PWD/data/crp_dual/crp_rlt_dataset" \
+     --config crp_dual_rlt.yaml \
+     --output-dir "$PWD/outputs/crp_rl_token"
    ```
 
-   ⚠️ **这条命令还没跑过。** 配置校验已通过，但 `train_rl_token` 在 CRP 数据上
-   端到端没验证过；第一次跑先用 `--steps 20` 做 smoke test（rlt-single 的做法）。
-   另外它默认 `--model-path lerobot/pi05_base`，我们要指向自己 SFT 后的权重。
+   （`--config` 只写文件名即可，会在包内配置目录找到；关键路径一律绝对化，
+   两个 workspace 并存时相对路径会静默指向错误的文件。A6000 上的完整流程见
+   `A6000_RL_TOKEN.md`。）
+
+   ✅ **已在采集机和 A6000 两边各跑通 20 步 smoke test**（loss 下降、checkpoint 落盘、
+   三路相机与 220,967 帧全部对上）。正式训练前仍建议先跑一次 `--steps 20`，那是最快的
+   环境自检。注意它默认 `--model-path lerobot/pi05_base`，必须显式指向自己 SFT 后的权重。
 
 2. **量关键段时长**，回填 gamma。可以从演示数据里估：标几条 episode 的对齐+插销区间。
 

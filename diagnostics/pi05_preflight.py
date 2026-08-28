@@ -122,6 +122,17 @@ def main() -> int:
     from lerobot.utils.control_utils import predict_action
     from lerobot.utils.device_utils import get_safe_torch_device
 
+    print("\n== CUDA 库 ==")
+    from evo_rlt.cli.common import warn_on_shadowing_cuda_libs
+    shadowing = warn_on_shadowing_cuda_libs()
+    if shadowing:
+        # Not fatal: some setups need a system CUDA. But this failure otherwise
+        # surfaces as CUBLAS_STATUS_INVALID_VALUE inside a GEMM, far from its cause.
+        print(f"  LD_LIBRARY_PATH 中有可能顶掉 torch 自带 CUDA 的目录: {', '.join(shadowing)}")
+        print("  若之后报 CUBLAS_STATUS_INVALID_VALUE, 用 LD_LIBRARY_PATH= 重跑")
+    else:
+        print("  没有会顶掉 torch 自带 CUDA 的目录")
+
     print("\n== 权重 ==")
     cfg = PreTrainedConfig.from_pretrained(args.policy_path)
     cfg.pretrained_path = str(args.policy_path)

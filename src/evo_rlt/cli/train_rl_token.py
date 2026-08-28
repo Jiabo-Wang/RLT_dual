@@ -17,6 +17,7 @@ from evo_rlt.cli.common import (
     build_pi05_policy,
     configure_logging,
     load_training_config,
+    resolve_artifact_path,
 )
 
 logger = configure_logging(__name__)
@@ -64,7 +65,11 @@ def main() -> None:
     # than as a shape error inside the first batch -- or worse, silently, since
     # slicing a 14-dim tensor to 12 is legal.
     if args.demo_dataset_path:
+        args.demo_dataset_path = str(
+            resolve_artifact_path(args.demo_dataset_path, must_exist=True, label="dataset")
+        )
         assert_config_matches_dataset(config, args.demo_dataset_path)
+    args.output_dir = str(resolve_artifact_path(args.output_dir, label="output-dir"))
     if args.steps is not None:
         config.demo_adaptation.steps = args.steps
     if args.batch_size is not None:
@@ -112,9 +117,14 @@ def main() -> None:
 
     dim_std = None
     if args.norm_stats:
-        stats = torch.load(args.norm_stats, map_location=args.device, weights_only=False)
+        # Written from one workspace and read from another is two different files;
+        # resolve and require it rather than training un-weighted by accident.
+        norm_stats_path = resolve_artifact_path(
+            args.norm_stats, must_exist=True, label="norm-stats"
+        )
+        stats = torch.load(norm_stats_path, map_location=args.device, weights_only=False)
         dim_std = stats["std"].to(args.device)
-        logger.info("Loaded dim_std from %s (shape=%s, gamma=%.2f)", args.norm_stats, tuple(dim_std.shape), args.norm_gamma)
+        logger.info("Loaded dim_std from %s (shape=%s, gamma=%.2f)", norm_stats_path, tuple(dim_std.shape), args.norm_gamma)
 
     demo_loader = make_demo_loader(
         dataset_path=args.demo_dataset_path,

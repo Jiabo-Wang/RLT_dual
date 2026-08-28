@@ -14,16 +14,34 @@
 | 主机 | `lenovo-ThinkStation-P920`，2× RTX A6000 48 GiB，503 GiB 内存 |
 | conda 环境 | `/home/lenovo/miniforge3/envs/crp-rlt` |
 | 演示数据集 | `/home/lenovo/桌面/crp_rlt_dataset` |
-| pi0.5 SFT 输出 | `/home/lenovo/crp-rlt/outputs/vla_ft` |
+| **pi0.5 SFT checkpoint** | **`/home/lenovo/crp-rlt/outputs/vla_crp_rlt/checkpoints/last/pretrained_model`** |
 | pi0.5 base | `/home/lenovo/models/pi05_base_a538eb27` |
 
-**数据集和 SFT 权重都已经在那台机器上，不需要用移动硬盘搬。** 先核对一遍再动手：
+⚠️ **checkpoint 路径变过。** 早先本文写的是 `outputs/vla_ft/...`，那是 wandb 元数据里
+记录的**当时**的 `output_dir`，现在已不存在。实际可加载的是 `outputs/vla_crp_rlt`，
+其中 `checkpoints/last` 是指向 `030000_crp——rlt` 的软链接。
+
+`vla_ft` 那个路径不存在时，transformers 会把它当成 Hugging Face repo id，于是报
+`Repo id must be in the form 'repo_name' or 'namespace/repo_name'` —— 一个关于命名的
+错误，完全没提目录不存在。**这已经在代码里修掉了**：`--model-path` 只要长得像本地路径
+就先做存在性检查，报错会写明查了哪个路径、父目录里实际有什么。不要去动 `repo_type`。
+
+### 先把这四个变量定死
+
+后面所有命令都用它们，避免任何相对路径。**在 A6000 上先跑这段并确认全绿：**
 
 ```bash
-ls ~/桌面/crp_rlt_dataset/meta/info.json
-ls ~/crp-rlt/outputs/vla_ft/checkpoints/
+export RLT_REPO=$HOME/RLT_dual
+export VLA_CKPT=$HOME/crp-rlt/outputs/vla_crp_rlt/checkpoints/last/pretrained_model
+export DEMO_DS=$HOME/桌面/crp_rlt_dataset
+export RLT_OUT=$RLT_REPO/outputs          # 所有产物统一放这里, 不跟着 cwd 跑
+
+for p in "$VLA_CKPT/config.json" "$VLA_CKPT/model.safetensors" "$DEMO_DS/meta/info.json"; do
+  [ -e "$p" ] && echo "OK   $p" || echo "缺失 $p"
+done
+mkdir -p "$RLT_OUT"
 python -c "
-import json; i=json.load(open('$HOME/桌面/crp_rlt_dataset/meta/info.json'))
+import json,os; i=json.load(open(os.environ['DEMO_DS']+'/meta/info.json'))
 print(i['total_episodes'],'ep /',i['total_frames'],'帧 @',i['fps'],'fps |',i['robot_type'])"
 # 期望: 622 ep / 220967 帧 @ 16 fps | crp_arm_dual
 ```
@@ -49,25 +67,54 @@ python -c "import evo_rlt; print('evo_rlt OK')"
 
 ```bash
 python -c "
-from lerobot.policies.pi05.modeling_pi05 import PI05Policy
-from evo_rlt.cli.common import load_training_config, assert_config_matches_dataset
-cfg = load_training_config('src/evo_rlt/core/configs/crp_dual_rlt.yaml')
-assert_config_matches_dataset(cfg, '$HOME/桌面/crp_rlt_dataset')
+import os
+from evo_rlt.cli.common import (load_training_config, assert_config_matches_dataset,
+                                resolve_model_path, warn_on_shadowing_cuda_libs)
+cfg = load_training_config('crp_dual_rlt.yaml')          # 裸文件名, 不依赖 cwd
+assert_config_matches_dataset(cfg, os.environ['DEMO_DS'])
+print('VLA ->', resolve_model_path(os.environ['VLA_CKPT']))
+warn_on_shadowing_cuda_libs()
 print('配置与数据集一致:', cfg.action_dim, '维,', cfg.control_hz, 'fps,', cfg.cameras)"
 ```
 
-这一步会自己报错，不用肉眼比对 —— `assert_config_matches_dataset` 会核对维度、相机、fps。
+这一步是完整的 preflight，四件事都会自己报错，不用肉眼比对：配置能否找到、维度/相机/fps
+是否与数据集一致、VLA checkpoint 是否真的存在、`LD_LIBRARY_PATH` 有没有 CUDA 冲突。
+
+**`--config` 现在只写文件名就行。** 之前 `--config src/evo_rlt/core/configs/crp_dual_rlt.yaml`
+在 `~/crp-rlt` 下会 `FileNotFoundError`，因为那是 `~/RLT_dual` 的相对路径。现在按
+「原样 → 仓库根 → 包内配置目录」依次查找，`--config crp_dual_rlt.yaml` 在任何目录下都能解析
+（找不到时会列出所有可用配置名）。老写法仍然有效。
+
+## 1b. LD_LIBRARY_PATH 与 cuBLAS 冲突
+
+这台机器上出现过：
+
+```
+RuntimeError: CUDA error: CUBLAS_STATUS_INVALID_VALUE when calling
+cublasSgemmStridedBatched(...)
+```
+
+根因是系统 CUDA 的 `libcublas` 排在 torch 自带的那份之前被加载。它不会在启动时报错，
+要等到第一个批量 GEMM 才炸，看起来像 shape bug。**清空 `LD_LIBRARY_PATH` 即可**：
+
+```bash
+LD_LIBRARY_PATH= python -m evo_rlt.cli...
+```
+
+`build_pi05_policy` 现在会在加载模型前自动检查并 warning，不用等到 GEMM。但它只是
+**警告不是拦截** —— 有些环境确实需要系统 CUDA，所以由你决定。下面的命令都带上了
+`LD_LIBRARY_PATH=`。
 
 ## 2. Smoke test（先跑这个）
 
 ```bash
-conda activate crp-rlt && cd ~/RLT_dual
+conda activate crp-rlt && cd "$RLT_REPO"
 
-HF_HUB_OFFLINE=1 python -m evo_rlt.cli.train_rl_token \
-  --model-path ~/crp-rlt/outputs/vla_ft/checkpoints/last/pretrained_model \
-  --demo-dataset-path ~/桌面/crp_rlt_dataset \
-  --config src/evo_rlt/core/configs/crp_dual_rlt.yaml \
-  --output-dir outputs/crp_rl_token_smoke \
+HF_HUB_OFFLINE=1 LD_LIBRARY_PATH= python -m evo_rlt.cli.train_rl_token \
+  --model-path "$VLA_CKPT" \
+  --demo-dataset-path "$DEMO_DS" \
+  --config crp_dual_rlt.yaml \
+  --output-dir "$RLT_OUT/crp_rl_token_smoke" \
   --steps 20 --save-every 20 --num-workers 0
 ```
 
@@ -108,33 +155,43 @@ that otherwise dominate the gradient"*）。
 这么极端不太可能纯属噪声，但到 A6000 上用默认的 100 batch 重量一遍再决定：
 
 ```bash
-HF_HUB_OFFLINE=1 python -m evo_rlt.cli.compute_token_variance \
-  --model-path ~/crp-rlt/outputs/vla_ft/checkpoints/last/pretrained_model \
-  --demo-dataset-path ~/桌面/crp_rlt_dataset \
-  --config src/evo_rlt/core/configs/crp_dual_rlt.yaml \
-  --output outputs/crp_token_std.pt \
+conda activate crp-rlt && cd "$RLT_REPO"
+
+HF_HUB_OFFLINE=1 LD_LIBRARY_PATH= python -m evo_rlt.cli.compute_token_variance \
+  --model-path "$VLA_CKPT" \
+  --demo-dataset-path "$DEMO_DS" \
+  --config crp_dual_rlt.yaml \
+  --output "$RLT_OUT/crp_token_std.pt" \
   --num-batches 100 --batch-size 2
 ```
 
 它会同时写一份 `.summary.json`，里面有按 std 排序的维度列表。
+
+⚠️ **`--output` 写绝对路径（`$RLT_OUT/...`）不是偶然。** 两个 workspace 并存时，
+在 `~/crp-rlt` 下写 `--output outputs/crp_token_std.pt` 产生的是
+`~/crp-rlt/outputs/crp_token_std.pt`，而之后在 `~/RLT_dual` 下用
+`--norm-stats outputs/crp_token_std.pt` 读的是另一个文件 —— 以前这会静默地退化成
+不加权训练。现在两端都会把解析后的绝对路径打进日志，`--norm-stats` 找不到文件直接报错。
+跑完对一下两条日志里的路径是否同一个。
 
 ## 4. 正式训练
 
 放行条件（照 rlt-single）：**2000–10000 步，重建 loss 收敛**。
 
 ```bash
-conda activate crp-rlt && cd ~/RLT_dual
+conda activate crp-rlt && cd "$RLT_REPO"
 
-HF_HUB_OFFLINE=1 python -m evo_rlt.cli.train_rl_token \
-  --model-path ~/crp-rlt/outputs/vla_ft/checkpoints/last/pretrained_model \
-  --demo-dataset-path ~/桌面/crp_rlt_dataset \
-  --config src/evo_rlt/core/configs/crp_dual_rlt.yaml \
-  --output-dir outputs/crp_rl_token \
+HF_HUB_OFFLINE=1 LD_LIBRARY_PATH= python -m evo_rlt.cli.train_rl_token \
+  --model-path "$VLA_CKPT" \
+  --demo-dataset-path "$DEMO_DS" \
+  --config crp_dual_rlt.yaml \
+  --output-dir "$RLT_OUT/crp_rl_token" \
   --steps 10000 \
   --save-every 2000 \
   --num-workers 8 \
-  --norm-stats outputs/crp_token_std.pt \
-  --norm-gamma 0.5
+  --norm-stats "$RLT_OUT/crp_token_std.pt" \
+  --norm-gamma 0.5 \
+  2>&1 | tee "$RLT_OUT/crp_rl_token_train.log"
 ```
 
 A6000 有 48 GiB 显存，`--num-workers 8` 和更大的 `--batch-size` 都开得起
@@ -154,17 +211,20 @@ A6000 有 48 GiB 显存，`--num-workers 8` 和更大的 `--batch-size` 都开�
 ```bash
 # 另开一个终端，每 10 分钟快照一次
 while true; do
-  f=outputs/crp_rl_token/demo_adapt_checkpoint.pt
-  [ -f "$f" ] && cp "$f" "outputs/crp_rl_token/snap_$(date +%H%M%S).pt"
+  f="$RLT_OUT/crp_rl_token/demo_adapt_checkpoint.pt"
+  [ -f "$f" ] && cp "$f" "$RLT_OUT/crp_rl_token/snap_$(date +%H%M%S).pt"
   sleep 600
 done
 ```
 
 ## 5. 训完带回部署机什么
 
-- `outputs/crp_rl_token/demo_adapt_checkpoint.pt`（RL token 权重，实测 977 MB —— 100.7M 参数按 fp32 存 + 优化器无关项）
-- `outputs/crp_rl_token/losses.json`（完整 loss 曲线，用来判断是否收敛）
-- `outputs/crp_token_std.pt` + 用的 `--norm-gamma` 值（不记下来事后无法复现）
+全部在 `$RLT_OUT`（= `~/RLT_dual/outputs`）下：
+
+- `crp_rl_token/demo_adapt_checkpoint.pt`（RL token 权重，实测 977 MB —— 100.7M 参数按 fp32 存）
+- `crp_rl_token/losses.json`（完整 loss 曲线，用来判断是否收敛）
+- `crp_rl_token_train.log`（`tee` 出来的完整日志，开头几行有解析后的绝对路径，存档用）
+- `crp_token_std.pt` + 实际用的 `--norm-gamma` 值（不记下来事后无法复现）
 
 阶段 3 之后 **VLA 和 RL token 全程冻结**，在线只训 actor 和 critic 两个小 MLP ——
 这是它能在几小时内收敛的根本原因。所以带回去的这两个 checkpoint 就是全部。
