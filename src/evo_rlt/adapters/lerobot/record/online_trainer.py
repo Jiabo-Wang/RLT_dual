@@ -94,6 +94,7 @@ class OnlineRLTrainer:
         self.actor_deploy_scale = 0.0
         self.policy.set_actor_deploy_scale(0.0)
 
+        self._metrics_path = self._init_metrics_sink(online_rl_cfg)
         self.wandb_run = self._init_wandb(online_rl_cfg, policy_cfg)
 
     @staticmethod
@@ -431,6 +432,24 @@ class OnlineRLTrainer:
             for key, value in latest.items()
         }
 
+    def _init_metrics_sink(self, online_rl_cfg: Any) -> Any | None:
+        """metrics.jsonl next to the checkpoints, appended to across resumes."""
+        from pathlib import Path
+
+        save_dir = getattr(online_rl_cfg, "save_dir", None)
+        if not save_dir:
+            return None
+        try:
+            path = Path(save_dir).expanduser()
+            path.mkdir(parents=True, exist_ok=True)
+            path = path / "metrics.jsonl"
+            logging.info("Online RL metrics -> %s", path)
+            logging.info("  live plot:  python diagnostics/watch_online_loss.py %s", path)
+            return path
+        except Exception as exc:
+            logging.warning("Could not open a metrics sink under %s (%s).", save_dir, exc)
+            return None
+
     def _init_wandb(self, online_rl_cfg: Any, policy_cfg: Any) -> Any | None:
         if not getattr(online_rl_cfg, "wandb", False):
             return None
@@ -494,9 +513,46 @@ class OnlineRLTrainer:
         )
 
     def _log(self, data: dict[str, Any], step: int) -> None:
+        """Fan every metric out to wandb (when enabled) and to a local JSONL file.
+
+        The JSONL sink exists because the loss curves are the only way to tell a
+        healthy online run from one that is quietly doing pure BC, and wandb
+        cannot be relied on to provide them here: the deployment box is run
+        offline and is not logged in, so `--wandb` would have to be dropped and
+        the metrics would vanish. The file needs no login, survives a crash mid
+        episode, and `diagnostics/watch_online_loss.py` tails it for a live plot.
+        """
+        self._log_jsonl(data, step)
         if self.wandb_run is None:
             return
         self.wandb_run.log(data, step=step)
+
+    def _log_jsonl(self, data: dict[str, Any], step: int) -> None:
+        if self._metrics_path is None:
+            return
+        import json
+        import time
+
+        row = {"step": step, "wall_time": time.time()}
+        for key, value in data.items():
+            # Tensors and numpy scalars are common here; keep the file plain JSON.
+            if hasattr(value, "item"):
+                try:
+                    value = value.item()
+                except Exception:
+                    value = None
+            if isinstance(value, (int, float, str, bool, type(None))):
+                row[key] = value
+        try:
+            with open(self._metrics_path, "a") as handle:
+                handle.write(json.dumps(row) + "\n")
+                # Flushed per row so a tailing plotter sees the latest episode and
+                # a hard kill cannot lose buffered history.
+                handle.flush()
+        except Exception as exc:
+            logging.warning("Could not append metrics to %s (%s); disabling the sink.",
+                            self._metrics_path, exc)
+            self._metrics_path = None
 
     def _autonomous_success_metrics(self, rolling_window: int = 20) -> dict[str, float | int]:
         """Summarize success without counting human-rescued episodes as autonomous.
