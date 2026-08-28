@@ -771,50 +771,139 @@ class CRPArmDual(Robot):
             raise RuntimeError(f"read_end_pose_user_second returned len {len(raw)}, expected 6")
         return [float(v) for v in raw]
 
+    @staticmethod
+    def _home_step(current: list[float], target: list[float],
+                   max_mm: float, max_deg: float) -> tuple[list[float], bool]:
+        """One bounded step from ``current`` toward ``target``.
+
+        Translation is clamped as a vector so a diagonal move cannot exceed
+        ``max_mm``; each rotation axis is clamped independently. Returns the next
+        pose and whether the target was reached.
+        """
+        dx, dy, dz = (target[i] - current[i] for i in range(3))
+        dist = math.sqrt(dx * dx + dy * dy + dz * dz)
+        scale = 1.0 if dist <= max_mm or dist == 0.0 else max_mm / dist
+        nxt = [current[i] + (target[i] - current[i]) * scale for i in range(3)]
+
+        rot_done = True
+        for i in range(3, 6):
+            delta = target[i] - current[i]
+            # Rotations are reported in degrees and wrap; take the short way round.
+            delta = (delta + 180.0) % 360.0 - 180.0
+            if abs(delta) > max_deg:
+                delta = math.copysign(max_deg, delta)
+                rot_done = False
+            nxt.append(current[i] + delta)
+
+        if scale == 1.0 and rot_done:
+            # Land on the recorded numbers exactly rather than an equivalent angle.
+            # Stepping the short way from roll=170 to roll=-180 arrives at +180: the
+            # same orientation, but this dataset's poses are all written as -180 and
+            # the controller is not ours to assume about.
+            return list(target), True
+        return nxt, False
+
     def go_home(self) -> bool:
-        """Command both arms to their recorded ``home_tcp``. Returns True if both took.
+        """Stream both arms back to their recorded ``home_tcp``. True if both arrived.
 
-        This is the one call here that *moves* the robot on its own, so it is only
-        ever reached from an explicit opt-in and never during a chunk: the caller
-        must have ended the episode first. A missing home_tcp is a no-op rather
-        than an error -- a manifest that never ran ``evo-rlt-crp-set-home`` should
-        simply behave the way it did before this existed.
+        This is the only call in the adapter that moves the robot of its own accord,
+        so it moves the way every other path does: one interpolated GP point per
+        tick, each bounded by ``home_max_step_mm`` / ``home_max_step_deg``. Writing
+        the target straight into GP instead makes the controller run a single MoveL
+        across the whole distance at its own speed -- on an industrial arm that is a
+        large uncontrolled motion, and it is what this method used to do.
 
-        The pose is repeated ``gp_trajectory_group_size`` times for the same reason
-        seed_gp_registers_from_current_tcp does it: the controller consumes GP as a
-        group and silently ignores a partially written one.
+        Refuses to move at all when an arm starts further than
+        ``home_max_distance_mm`` from home: that means the recorded pose does not
+        belong to the current setup, and creeping there 2 mm at a time is not a safe
+        way to discover it. A missing home_tcp is a no-op.
         """
         if not self._sdk_connected:
             raise DeviceNotConnectedError(f"{self} is not connected.")
 
-        group = max(1, int(self.config.gp_trajectory_group_size))
-        results: list[bool] = []
-        for label, tcp, register, send in (
+        crp = self.crp_arm_robot
+        arms = [
             ("left", self.config.home_tcp_left, self.config.gp_register_left,
-             self.send_GPs_first),
+             crp.read_end_pose_user, "first"),
             ("right", self.config.home_tcp_right, self.config.gp_register_right,
-             self.send_GPs_second),
-        ):
+             crp.read_end_pose_user_second, "second"),
+        ]
+
+        targets: dict[str, tuple[list[float], int, Any]] = {}
+        for label, tcp, register, read_tcp, _side in arms:
             if not tcp:
                 logger.info("%s go-home: no home_tcp for %s, skipping.", self, label)
                 continue
             if len(tcp) != 6:
-                logger.warning(
-                    "%s go-home: home_tcp for %s has %d values, expected 6 "
-                    "[x, y, z, roll, pitch, yaw]; skipping.", self, label, len(tcp),
+                logger.warning("%s go-home: home_tcp for %s has %d values, expected 6.",
+                               self, label, len(tcp))
+                return False
+            try:
+                current = [float(v) for v in read_tcp()]
+            except Exception as exc:
+                logger.warning("%s go-home: TCP read failed for %s (%s); not moving.",
+                               self, label, exc)
+                return False
+            gap = math.dist(current[:3], [float(v) for v in tcp[:3]])
+            if gap > self.config.home_max_distance_mm:
+                logger.error(
+                    "%s go-home: %s is %.0f mm from home, over the %.0f mm limit. "
+                    "Refusing to move -- re-record home_tcp with evo-rlt-crp-set-home "
+                    "if the setup changed.",
+                    self, label, gap, self.config.home_max_distance_mm,
                 )
-                results.append(False)
-                continue
-            pose = [float(v) for v in tcp]
-            ok = bool(send(int(register), [list(pose) for _ in range(group)]))
-            if ok:
-                logger.info("%s go-home: %s -> (%.1f, %.1f, %.1f)",
-                            self, label, pose[0], pose[1], pose[2])
-            else:
-                logger.warning("%s go-home: set_GPs(GP%s) rejected for %s.",
-                               self, register, label)
-            results.append(ok)
-        return bool(results) and all(results)
+                return False
+            logger.info("%s go-home: %s starts %.0f mm out.", self, label, gap)
+            targets[label] = ([float(v) for v in tcp], int(register), current)
+
+        if not targets:
+            return False
+
+        period = 1.0 / max(1e-6, float(self.config.home_tick_hz))
+        deadline = time.monotonic() + float(self.config.home_timeout_s)
+        arrived = {label: False for label in targets}
+
+        while not all(arrived.values()):
+            if time.monotonic() > deadline:
+                logger.warning(
+                    "%s go-home: timed out after %.0fs with %s still moving.",
+                    self, self.config.home_timeout_s,
+                    [k for k, v in arrived.items() if not v],
+                )
+                return False
+
+            left_gp = right_gp = None
+            for label in ("left", "right"):
+                if label not in targets or arrived[label]:
+                    continue
+                target, _register, current = targets[label]
+                nxt, done = self._home_step(
+                    current, target,
+                    float(self.config.home_max_step_mm),
+                    float(self.config.home_max_step_deg),
+                )
+                targets[label] = (target, _register, nxt)
+                arrived[label] = done
+                if label == "left":
+                    left_gp = nxt
+                else:
+                    right_gp = nxt
+
+            ok_left, ok_right = self.send_dual_gp_stream(
+                left_gp=left_gp,
+                right_gp=right_gp,
+                gp_index_left=self.config.gp_register_left,
+                gp_index_right=self.config.gp_register_right,
+            )
+            if (left_gp is not None and ok_left is False) or (
+                right_gp is not None and ok_right is False
+            ):
+                logger.warning("%s go-home: GP write rejected; stopping.", self)
+                return False
+            time.sleep(period)
+
+        logger.info("%s go-home: both arms arrived.", self)
+        return True
 
     def send_GPs_first(self, start_index: int, gp_points: list[list[float]]) -> bool:
         with self._sdk_lock:

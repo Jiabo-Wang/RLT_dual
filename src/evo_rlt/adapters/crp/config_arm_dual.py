@@ -82,6 +82,21 @@ class CRPArmDualConfig(RobotConfig):
     # (README_crp_dual.md, section 9). None disables go-home for that arm.
     home_tcp_left: list[float] | None = None
     home_tcp_right: list[float] | None = None
+
+    # Go-home is streamed one interpolated point per tick, the same way the teleop
+    # and policy paths drive the arm. Writing the target straight into GP instead
+    # makes the controller run a single MoveL across the whole distance at its own
+    # speed, which on an industrial arm is a large uncontrolled motion.
+    home_max_step_mm: float = 2.0        # per tick, per arm (2 mm @ 16 Hz ~ 32 mm/s)
+    home_max_step_deg: float = 1.0       # per tick, per rotation axis
+    home_tick_hz: float = 16.0
+    # Refuse to run at all if the arm starts further away than this. A distance
+    # this large means the recorded pose does not belong to the current setup, and
+    # creeping there 2 mm at a time is not a safe way to find that out.
+    home_max_distance_mm: float = 500.0
+    # Hard ceiling on the whole return, so a rejected GP write or a controller that
+    # stops consuming cannot leave this spinning.
+    home_timeout_s: float = 30.0
     # Opening (UI50, 0-255, 0 closed) to command each gripper before a run starts.
     # ``None`` leaves the gripper where it is, which costs the first observation.
     #
