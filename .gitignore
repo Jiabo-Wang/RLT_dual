@@ -12,6 +12,9 @@ pretrained/
 # pi0.5 SFT 权重: 8.8 GB, 单文件 9.35 GB 超 GitHub 100 MB 上限。
 # 走 HF hub 或内部存储分发, 不入 git。
 pretrained_model/
+# RL token checkpoint: 977 MB (256M 参数 fp32)。同样超上限。
+# losses.json 很小, 曲线图另存到 docs/ 下跟仓库走。
+crp_rl_token/
 cache/
 wandb/
 data/

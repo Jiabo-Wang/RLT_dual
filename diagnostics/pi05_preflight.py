@@ -115,11 +115,10 @@ def main() -> int:
 
     from evo_rlt.adapters.lerobot.pi05_low_mem_load import install
     from lerobot.configs.policies import PreTrainedConfig
-    from lerobot.datasets.feature_utils import build_dataset_frame
+    from evo_rlt.adapters.lerobot._compat import build_dataset_frame, predict_action
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
     from lerobot.policies.factory import get_policy_class, make_pre_post_processors
     from lerobot.utils.constants import OBS_STR
-    from lerobot.utils.control_utils import predict_action
     from lerobot.utils.device_utils import get_safe_torch_device
 
     print("\n== CUDA 库 ==")

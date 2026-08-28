@@ -28,7 +28,7 @@ from lerobot.processor import PolicyAction, PolicyProcessorPipeline, RobotAction
 from evo_rlt.adapters.lerobot.record.acp_tags import build_acp_tagged_task
 from lerobot.robots import Robot
 from lerobot.teleoperators import Teleoperator
-from lerobot.utils.control_utils import predict_action
+from evo_rlt.adapters.lerobot._compat import predict_action
 
 
 @dataclass

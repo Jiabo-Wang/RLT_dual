@@ -78,7 +78,7 @@ from lerobot.configs import parser
 from lerobot.configs.policies import PreTrainedConfig
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.datasets.pipeline_features import aggregate_pipeline_dataset_features, create_initial_features
-from lerobot.datasets.feature_utils import build_dataset_frame, combine_feature_dicts
+from evo_rlt.adapters.lerobot._compat import build_dataset_frame, combine_feature_dicts
 from lerobot.datasets.io_utils import write_info
 from lerobot.datasets.video_utils import VideoEncodingManager
 from lerobot.policies.factory import make_policy, make_pre_post_processors
@@ -124,7 +124,7 @@ from lerobot.teleoperators import (  # noqa: F401
     unitree_g1,
 )
 from lerobot.utils.constants import ACTION, OBS_STR
-from lerobot.utils.control_utils import (
+from evo_rlt.adapters.lerobot._compat import (
     init_keyboard_listener,
     sanity_check_dataset_name,
     sanity_check_dataset_robot_compatibility,

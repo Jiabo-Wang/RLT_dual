@@ -26,11 +26,26 @@
 | 1 | 演示采集 | ✅ | 622 ep / 220,967 帧 @ 16 fps，`crp_arm_dual` |
 | 2 | VLA 微调（SFT） | ✅ | pi0.5 全参 30k 步，loss 0.0189，见 `docs/pi05_vla_ft_report/` |
 | — | VLA 部署验证 | ✅ | 显存 8.71 GiB，重规划 178 ms（预算 3.12 s） |
-| 3 | **RL-token 离线训练** | 🔄 **进行中** | 两台机器各跑通 20 步 smoke test；A6000 上开训 |
-| 4 | warmup | ❌ | 代码有，未跑 |
+| 3 | RL-token 离线训练 | ✅ | A6000 上 10,000 步，末 1k 均值 0.2533，见 `docs/rl_token_report/` |
+| 4 | warmup | ❌ **下一步** | 需要真机 rollout，回部署机做 |
 | 5 | critic-only | ❌ | 代码有，未跑 |
 | 6 | 在线强化 | ❌ | 代码有，未跑 |
 | 7 | 对照评测 | ❌ | 未开始 |
+
+### 阶段 3 结果（2026-08-28）
+
+A6000 上训完 10,000 步，`num_rl_tokens=1`（论文值）、`norm_gamma=0.5`（按实测的 token
+方差集中度选的 —— 方差最大的单个维度占原始 MSE 的 42.6%）。
+
+重建 loss `1.936 → 0.253`，逐 1000 步的边际收益 `−46.9% → −11.9% → … → −0.9%`，
+末 1000 步与末 100 步均值同为 0.2533，已经平了。放行条件（rlt-single：2000–10000 步、
+重建 loss 收敛）满足。曲线与逐区间表在 `docs/rl_token_report/`。
+
+checkpoint 已验证可用：训练保存的是含 decoder 的完整模块（256.0M 参数，977 MB），
+推理只加载 encoder（100.7M，37 个键）—— 实测 `missing=0`，37 个键全部拿到训练值且
+全部不同于随机初始化，56 个 unexpected 正是被正确丢弃的 decoder 权重。
+（`build_pi05_policy` 用 `strict=False` 加载，所以这一步值得每次换 checkpoint 时复验：
+它同样会静默容忍 encoder 键缺失。）
 
 **关键段标注（`complementary_info.phase`）全部 220,967 帧都是 0.0，即从未标注过。**
 这不阻塞阶段 3 —— `train_rl_token` 只吃原始演示数据做重建，不需要 phase。它阻塞的是
@@ -156,8 +171,7 @@ rlt-single 在 30 fps 上遇到同一问题（0.99 只有 2.3 s），改用 0.99
 
 ## 5. 接下来的顺序
 
-1. **跑阶段 3：训 RL token。** 冻结 pi0.5，训 encoder/decoder 重建瓶颈，2000–10000 步，
-   放行条件是重建 loss 收敛。用新配置：
+1. ~~**跑阶段 3：训 RL token。**~~ ✅ **已完成**（见 §1）。当时用的命令：
 
    ```bash
    conda activate crp_rlt_small && cd ~/RLT_dual

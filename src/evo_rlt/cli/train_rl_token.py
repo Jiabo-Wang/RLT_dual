@@ -106,6 +106,13 @@ def main() -> None:
     )
 
     rl_token_full = algorithm.build_rl_token_full(args.device)
+    # The line above logs policy.rl_token, which is the inference-only module
+    # (encoder). What actually gets trained and saved is rl_token_full, encoder
+    # plus decoder -- 2.5x larger. Report both so the checkpoint size makes sense.
+    logger.info(
+        "Trainable (encoder + decoder, this is what gets saved): %.1fM params",
+        sum(p.numel() for p in rl_token_full.parameters()) / 1e6,
+    )
     start_step = 0
     prior_losses = None
     if args.resume_checkpoint:
