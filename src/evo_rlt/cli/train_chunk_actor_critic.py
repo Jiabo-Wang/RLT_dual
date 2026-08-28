@@ -12,7 +12,12 @@ SCRIPT_ROOT = Path(__file__).resolve().parent
 if str(SCRIPT_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPT_ROOT))
 
-from evo_rlt.cli.common import build_pi05_policy, configure_logging, load_training_config
+from evo_rlt.cli.common import (
+    assert_config_matches_dataset,
+    build_pi05_policy,
+    configure_logging,
+    load_training_config,
+)
 
 logger = configure_logging(__name__)
 
@@ -144,6 +149,8 @@ def main() -> None:
     from evo_rlt.core.trainer import offline_rl_loop
 
     config = load_training_config(args.config)
+    if getattr(args, "demo_dataset_path", None):
+        assert_config_matches_dataset(config, args.demo_dataset_path)
     apply_overrides(config, args)
 
     if args.transition_cache_dir is not None:

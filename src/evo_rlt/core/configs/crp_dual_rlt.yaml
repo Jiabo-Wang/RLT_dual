@@ -1,0 +1,97 @@
+# RLT on the CRP dual-arm + pi0.5.
+#
+# pi05_rlt.yaml is the SO101 dual-arm config and does not fit this robot: it
+# declares 30 Hz, 12 action dims, and a `right_front` camera that does not
+# exist here. Every value below is either measured off
+# data/crp_dual/crp_rlt_dataset + pretrained_model/config.json, or carried
+# over from the paper -- the comment says which.
+#
+# Verified against the dataset on 2026-08-28:
+#   fps 16 | 622 ep / 220,967 frames | robot_type crp_arm_dual
+#   observation.state [14]  left_j1..j6.pos, right_j1..j6.pos, left_ui50, right_ui50
+#   action            [14]  left_x/y/z/roll/pitch/yaw.pos, right_*, left_ui50, right_ui50
+#   cameras           top, left_wrist, right_wrist
+#
+# NOTE: state and action are NOT the same space on this robot. State is joint
+# angles; action is a cartesian EE pose (the CRP controller runs its own IK on
+# the GP channel). On SO101 both are joint positions. Anything that assumes
+# they are interchangeable -- an actor residual read as "a nudge in state
+# space", or a single scalar action_clip_delta covering both mm and degrees --
+# needs to be checked before the first online run. See docs/notes/RLT_PLAN.md.
+
+seed: 0
+
+control_hz: 16          # measured; the dataset writes timestamps at 16 fps
+action_dim: 14          # measured: len(action_feature_names)
+proprio_dim: 14         # measured: len(observation.state.names)
+vla_horizon: 50         # pretrained_model/config.json chunk_size
+chunk_length: 10        # paper: C = 10, and C < H is a stated requirement
+
+cameras:
+  - top
+  - left_wrist
+  - right_wrist
+
+rl_token:
+  token_dim: 2048       # paper
+  nhead: 8
+  enc_layers: 3
+  dec_layers: 3
+  ff_dim: 4096
+  # The paper uses a single RL token as the autoregressive reconstruction
+  # bottleneck. pi05_rlt.yaml sets 4, which is an undocumented deviation --
+  # keeping 1 here so the first CRP run is comparable to the paper. Widen it
+  # only as a measured A/B, not as a starting point.
+  num_rl_tokens: 1
+
+demo_adaptation:
+  steps: 10000          # rlt-single converged its reconstruction loss by 10k
+  batch_size: 2
+  lr: 2.0e-4
+  vla_ft_weight: 0.0    # VLA stays frozen from here on
+  grad_clip_norm: 1.0
+  warmup_steps: 2000
+  min_lr: 5.0e-6
+
+actor:
+  hidden_dim: 512       # paper's harder-task size; the screw/insert task is that
+  num_layers: 3
+  fixed_std: 0.05       # paper: "a small fixed standard deviation"
+  lr: 3.0e-4
+  ref_dropout_p: 0.5    # paper: reference chunk masked 50% during training
+
+critic:
+  hidden_dim: 512
+  num_layers: 3
+  lr: 3.0e-4
+
+training:
+  # gamma is the one value that MUST be revisited once the critical phase has
+  # been timed on this robot -- do not inherit 0.99 by default.
+  #
+  # The critic bootstraps a whole chunk, so the effective per-chunk discount is
+  # gamma**C. Half-life in seconds = ln(0.5) / (C * ln(gamma)) * (C / fps):
+  #
+  #   gamma    half-life @ 16 fps, C=10
+  #   0.99      4.3 s      <- too short for a multi-step assembly
+  #   0.995     8.6 s
+  #   0.998    21.6 s
+  #   0.999    43.3 s
+  #
+  # rlt-single hit this at 30 fps (0.99 gave 2.3 s) and moved to 0.999. 16 fps
+  # is more forgiving per chunk, but this task's critical phase (align the pin,
+  # insert it) is longer than their 5-8 s. 0.999 covers a phase up to ~40 s.
+  gamma: 0.999
+  beta: 1.0
+  tau: 0.005
+  batch_size: 256
+  utd_ratio: 5          # paper: 5. The CLI default is 1 -- pass it explicitly.
+  actor_update_interval: 2   # paper: critic:actor update ratio 2:1
+
+replay:
+  capacity: 200000
+
+collector:
+  warmup_steps: 5000
+  total_env_steps: 100000
+  chunk_subsample_stride: 2   # offline path only; the online path does not subsample

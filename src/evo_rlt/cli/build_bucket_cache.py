@@ -19,7 +19,11 @@ SCRIPT_ROOT = Path(__file__).resolve().parent
 if str(SCRIPT_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPT_ROOT))
 
-from evo_rlt.cli.common import configure_logging, load_training_config
+from evo_rlt.cli.common import (
+    assert_config_matches_dataset,
+    configure_logging,
+    load_training_config,
+)
 
 logger = configure_logging(__name__)
 
@@ -81,6 +85,8 @@ def main() -> None:
     )
 
     config = load_training_config(args.config)
+    if getattr(args, "demo_dataset_path", None):
+        assert_config_matches_dataset(config, args.demo_dataset_path)
     config.offline_rl.frame_stride = args.frame_stride
     config.offline_rl.train_ratio = args.train_ratio
     config.offline_rl.val_ratio = args.val_ratio

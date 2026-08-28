@@ -12,7 +12,12 @@ SCRIPT_ROOT = Path(__file__).resolve().parent
 if str(SCRIPT_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPT_ROOT))
 
-from evo_rlt.cli.common import build_pi05_policy, configure_logging, load_training_config
+from evo_rlt.cli.common import (
+    assert_config_matches_dataset,
+    build_pi05_policy,
+    configure_logging,
+    load_training_config,
+)
 
 logger = configure_logging(__name__)
 
@@ -55,6 +60,11 @@ def main() -> None:
     from evo_rlt.core.trainer import demo_adaptation
 
     config = load_training_config(args.config)
+    # Catch an SO101 config pointed at a CRP dataset (or vice versa) here rather
+    # than as a shape error inside the first batch -- or worse, silently, since
+    # slicing a 14-dim tensor to 12 is legal.
+    if args.demo_dataset_path:
+        assert_config_matches_dataset(config, args.demo_dataset_path)
     if args.steps is not None:
         config.demo_adaptation.steps = args.steps
     if args.batch_size is not None:
