@@ -1075,7 +1075,10 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
             or (cfg.rlt.enable and cfg.rlt.vla_model)
             or teleop_r_key_mode
         ):
-            from lerobot.utils.critical_phase_tracker import CriticalPhaseTracker, EpisodeIntervalTracker
+            from evo_rlt.adapters.lerobot.record.critical_phase import (
+                CriticalPhaseTracker,
+                EpisodeIntervalTracker,
+            )
 
             critical_phase_tracker = CriticalPhaseTracker(
                 auto_save_path=dataset.root / "critical_phase_intervals.json",
