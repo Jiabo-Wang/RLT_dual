@@ -268,29 +268,30 @@ lerobot-edit-dataset \
 
 ## 6. 训练 ACT
 
-### 先统一 CRP roll 表示（只需执行一次）
+本机环境：`conda activate crp_rlt_small`，仓库：`~/RLT_dual`。
+训练数据与当前 smolVLA 权重相同：`data/crp_dual/crp_rlt_dataset`
+（绝对路径 `~/RLT_dual/data/crp_dual/crp_rlt_dataset`；`local/crp_rlt_dataset`，622 ep / 220967 帧 @ 16 fps，`crp_arm_dual`）。
 
-CRP 锁定姿态位于欧拉角的 `-180/+180` 分界，同一姿态在原始数据里有两种数值。
-只处理合并后的 v3；`0817/0818/0819_screw_demo_v1` 三天原始 session 不会被修改。
+### roll 表示（只需确认一次）
+
+该数据集的 `left_roll.pos` / `right_roll.pos` **已经全是 ≈ -180**，一般不用再 canonicalize。
+若换了新合并数据再检查：
 
 ```bash
-python -m evo_rlt.cli.canonicalize_crp_rolls \
-  --root data/crp_dual/crp_merged_screw_v3
+conda activate crp_rlt_small && cd ~/RLT_dual
+python -m evo_rlt.cli.canonicalize_crp_rolls --root data/crp_dual/crp_rlt_dataset
 ```
 
-清洗后 `left_roll.pos` / `right_roll.pos` 应当都是 `-180`，必须重新训练，不能续训
-使用旧归一化统计量的 checkpoint。
+清洗后若 roll 有变化，必须重新训练，不能续训旧归一化统计量的 checkpoint。
 
 ### 训练
 
-直接使用 v3 的全部 648 条 episode 训练，不留验证集。
-
 ```bash
-conda activate rlt_dual && cd ~/intern/RLT_dual
+conda activate crp_rlt_small && cd ~/RLT_dual
 
 HF_HUB_OFFLINE=1 lerobot-train \
-  --dataset.repo_id=local/crp_merged_screw_v3 \
-  --dataset.root=data/crp_dual/crp_merged_screw_v3 \
+  --dataset.repo_id=local/crp_rlt_dataset \
+  --dataset.root=data/crp_dual/crp_rlt_dataset \
   --policy.type=act \
   --policy.chunk_size=32 \
   --policy.n_action_steps=8 \
@@ -302,36 +303,36 @@ HF_HUB_OFFLINE=1 lerobot-train \
   --eval_freq=0 \
   --num_workers=2 \
   --wandb.enable=true \
+  --wandb.mode=offline \
   --wandb.project=crp_dual_act \
   --wandb.disable_artifact=true \
-  --output_dir=outputs/act_crp_screw_v3 \
-  --job_name=act_crp_screw_v3
-
+  --output_dir=outputs/act_crp_rlt_small_v1 \
+  --job_name=act_crp_rlt_small_v1
 ```
 
-当前没有仿真评估环境，因此 `eval_freq` 保持为 `0`。通过定期保存 checkpoint，并在固定
-真机工况下比较成功率来选择部署模型。
+`eval_freq=0`（无仿真评估）。定期存 ckpt，真机比成功率选模型。
 
 ### 续训
 
 ```bash
+conda activate crp_rlt_small && cd ~/RLT_dual
+
 HF_HUB_OFFLINE=1 lerobot-train \
-  --config_path=outputs/act_crp_screw_v3/checkpoints/last/pretrained_model/train_config.json \
+  --config_path=outputs/act_crp_rlt_small_v1/checkpoints/last/pretrained_model/train_config.json \
   --resume=true
 ```
 
 ### 部署 / 采 ACT baseline
 
 ```bash
-
-conda activate rlt_dual && cd ~/intern/RLT_dual
+conda activate crp_rlt_small && cd ~/RLT_dual
 
 evo-rlt-record full --initial-source vla \
   --setup-json configs/crp_dual_manifest.json \
-  --policy-path outputs/act_crp_screw_v3/checkpoints/080000/pretrained_model \
+  --policy-path outputs/act_crp_rlt_small_v1/checkpoints/080000/pretrained_model \
   --policy-n-action-steps 8 \
   --task "Pick up the workpiece and place it on the platform. Remove the pin from the holder and insert it into the hole on top of the workpiece. Then place the assembled object in the target area." \
-  --dataset-tag act_eval_080000 \
+  --dataset-tag act_eval \
   --num-episodes 10 \
   --episode-time-s 300 \
   --reset-time-s 10 \
@@ -339,19 +340,28 @@ evo-rlt-record full --initial-source vla \
   --no-teleop
 ```
 
+连接成功后会有 GP alignment 倒计时；倒计时**之后**在示教器按绿色 START。
+
 ## 7. 训练 smolVLA
+
+数据：`data/crp_dual/crp_rlt_dataset`（见第 6 节）。
+
+- 已训完的冻结版 baseline：`outputs/smolvla_crp_small_v1`（`last` → `060000`；`freeze_vision_encoder=true`）
+- 下面默认指令是**解冻版** `smolvla_crp_small_v2`（加载 VLM 权重 + 解冻视觉编码器 + 不全只训 expert）
 
 ### 环境补充（一次性）
 
 ```bash
-conda activate rlt_dual
+conda activate crp_rlt_small
 pip install 'num2words>=0.5.14,<0.6.0'
 ```
 
 ### 下载权重（一次性）
 
+解冻版需要本机能读到 `SmolVLM2`（`load_vlm_weights=true`）。若已缓存可跳过。
+
 ```bash
-conda activate rlt_dual && cd ~/intern/RLT_dual
+conda activate crp_rlt_small && cd ~/RLT_dual
 
 python -c "
 from huggingface_hub import snapshot_download
@@ -363,59 +373,69 @@ AutoProcessor.from_pretrained('HuggingFaceTB/SmolVLM2-500M-Video-Instruct')
 print('processor ok')"
 ```
 
-### 训练
+### 训练（解冻版）
+
+`bs=8`（解冻更吃显存），`80k` steps，三路相机 `rename_map` → camera1/2/3：
 
 ```bash
-conda activate rlt_dual && cd ~/intern/RLT_dual
+conda activate crp_rlt_small && cd ~/RLT_dual
 
 RM='{"observation.images.top": "observation.images.camera1", "observation.images.left_wrist": "observation.images.camera2", "observation.images.right_wrist": "observation.images.camera3"}'
 
 HF_HUB_OFFLINE=1 lerobot-train \
-  --dataset.repo_id=local/crp_merged_screw_v2 \
-  --dataset.root=data/crp_dual/crp_merged_screw_v2 \
+  --dataset.repo_id=local/crp_rlt_dataset \
+  --dataset.root=data/crp_dual/crp_rlt_dataset \
   --policy.path=lerobot/smolvla_base \
-  --policy.load_vlm_weights=false \
+  --policy.load_vlm_weights=true \
+  --policy.freeze_vision_encoder=false \
+  --policy.train_expert_only=false \
+  --policy.optimizer_lr=5e-5 \
+  --policy.scheduler_decay_lr=2.5e-6 \
+  --policy.scheduler_warmup_steps=2000 \
   --policy.chunk_size=32 \
   --policy.n_action_steps=32 \
-  --policy.scheduler_decay_steps=30000 \
+  --policy.scheduler_decay_steps=80000 \
   --policy.device=cuda \
   --policy.push_to_hub=false \
   --rename_map="$RM" \
-  --batch_size=16 \
-  --steps=30000 \
-  --save_freq=5000 \
+  --batch_size=8 \
+  --steps=80000 \
+  --save_freq=10000 \
   --eval_freq=0 \
   --num_workers=2 \
   --wandb.enable=true \
+  --wandb.mode=offline \
   --wandb.project=crp_dual_smolvla \
   --wandb.disable_artifact=true \
-  --output_dir=outputs/smolvla_crp_screw_v1 \
-  --job_name=smolvla_crp_screw_v1
+  --output_dir=outputs/smolvla_crp_small_v2 \
+  --job_name=smolvla_crp_small_v2
 ```
+
+OOM 时把 `--batch_size=8` 改成 `4`。不要往 `v1` 上 `--resume` 解冻（配方不同，应新开 `v2`）。
 
 ### 续训
 
 ```bash
-conda activate rlt_dual && cd ~/intern/RLT_dual
+conda activate crp_rlt_small && cd ~/RLT_dual
 
 HF_HUB_OFFLINE=1 lerobot-train \
-  --config_path=outputs/smolvla_crp_screw_v1/checkpoints/last/pretrained_model/train_config.json \
+  --config_path=outputs/smolvla_crp_small_v2/checkpoints/last/pretrained_model/train_config.json \
   --resume=true
 ```
 
 ### 部署前 dry-run
 
 ```bash
-conda activate rlt_dual && cd ~/intern/RLT_dual
+conda activate crp_rlt_small && cd ~/RLT_dual
 
 RM='{"observation.images.top": "observation.images.camera1", "observation.images.left_wrist": "observation.images.camera2", "observation.images.right_wrist": "observation.images.camera3"}'
 
 evo-rlt-record full --initial-source vla \
   --setup-json configs/crp_dual_manifest.json \
-  --policy-path outputs/smolvla_crp_screw_v1/checkpoints/last/pretrained_model \
+  --policy-path outputs/smolvla_crp_small_v2/checkpoints/last/pretrained_model \
   --rename-map "$RM" \
   --task "Pick up the workpiece and place it on the platform. Remove the pin from the holder and insert it into the hole on top of the workpiece. Then place the assembled object in the target area." \
-  --dataset-tag smolvla_eval \
+  --dataset-tag smolvla_eval_v2 \
   --num-episodes 10 \
   --episode-time-s 300 \
   --reset-time-s 10 \
@@ -427,22 +447,24 @@ evo-rlt-record full --initial-source vla \
 ### 部署 / 采 smolVLA baseline
 
 ```bash
-conda activate rlt_dual && cd ~/intern/RLT_dual
+conda activate crp_rlt_small && cd ~/RLT_dual
 
 RM='{"observation.images.top": "observation.images.camera1", "observation.images.left_wrist": "observation.images.camera2", "observation.images.right_wrist": "observation.images.camera3"}'
 
 evo-rlt-record full --initial-source vla \
   --setup-json configs/crp_dual_manifest.json \
-  --policy-path outputs/smolvla_crp_screw_v1/checkpoints/last/pretrained_model \
+  --policy-path outputs/smolvla_crp_small_v2/checkpoints/last/pretrained_model \
   --rename-map "$RM" \
   --task "Pick up the workpiece and place it on the platform. Remove the pin from the holder and insert it into the hole on top of the workpiece. Then place the assembled object in the target area." \
-  --dataset-tag smolvla_eval \
+  --dataset-tag smolvla_eval_v2 \
   --num-episodes 10 \
   --episode-time-s 300 \
   --reset-time-s 10 \
   --vcodec h264 \
   --no-teleop
 ```
+
+`--rename-map` **必带**。评估数据写到 `~/RLT_dual/data/crp_dual/`。旧冻结版部署把 `policy-path` 改回 `outputs/smolvla_crp_small_v1/checkpoints/last/pretrained_model` 即可。
 
 ## 8. 训练 pi0.5
 
@@ -458,7 +480,7 @@ python -m lerobot.scripts.lerobot_train \
   --policy.device=cuda \
   --policy.dtype=bfloat16 \
   --policy.push_to_hub=false \
-  --batch_size=8 \
+  --batch_size=16\
   --steps=100000 \
   --save_freq=10000 \
   --eval_freq=0 \
@@ -502,21 +524,89 @@ python -m lerobot.scripts.lerobot_train \
 
 ### 部署 / 采 pi0.5 baseline
 
+已训完的 SFT 权重放在仓库根 `pretrained_model/`（30k steps，final loss 0.0189，
+见 `outputs/pi05_vla_ft_report/`）。它是在另一台机器（ThinkStation P920 / 2x A6000）
+上训的，`train_config.json` 里的 `/home/lenovo/...` 路径不用管 —— `backend.py` 会把
+`pretrained_path` 覆盖成实际给的 `--policy-path`。
+
+`--rename-map` **必带**。pi0.5 的输入是 `base_0_rgb / left_wrist_0_rgb /
+right_wrist_0_rgb`，机器人给的是 `top / left_wrist / right_wrist`，不映射会在
+`_validate_policy_image_features` 直接报错。
+
+`--no-teleop` **必带**（除非真要主臂介入）。不带会去开 `/dev/serial/by-id/` 下的
+两个主臂串口；只跑 VLA 基线时主臂通常没插，也不需要标定文件。
+
 ```bash
-conda activate rlt_dual && cd ~/intern/RLT_dual
+conda activate crp_rlt_small && cd ~/RLT_dual
+
+RM='{"observation.images.top": "observation.images.base_0_rgb", "observation.images.left_wrist": "observation.images.left_wrist_0_rgb", "observation.images.right_wrist": "observation.images.right_wrist_0_rgb"}'
 
 evo-rlt-record full --initial-source vla \
   --setup-json configs/crp_dual_manifest.json \
-  --policy-path outputs/pi05_crp_ft/checkpoints/last/pretrained_model \
+  --policy-path pretrained_model \
+  --rename-map "$RM" \
   --task "Pick up the workpiece and place it on the platform. Remove the pin from the holder and insert it into the hole on top of the workpiece. Then place the assembled object in the target area." \
   --dataset-tag pi05_baseline_eval \
   --num-episodes 30 \
   --episode-time-s 300 \
   --reset-time-s 10 \
-  --vcodec h264
+  --vcodec h264 \
+  --no-teleop
 ```
 
+加 `--dry-run` 只会把拼好的 `lerobot-record` argv 打出来就退出（见
+`runner.py` 的 `if args.dry_run`）—— 它验证的是参数拼装，**不加载权重、不连硬件**。
+
+真正的部署前自检用这个（机械臂断电也能跑，它不碰臂）：
+
+```bash
+conda activate crp_rlt_small && cd ~/RLT_dual
+python diagnostics/pi05_preflight.py
+```
+
+它按 serial 解析三路相机、用和 `backend.py` 同一条路径加载权重、把一帧真实观测
+推过 preprocessor → policy → postprocessor，并对着 16 fps 预算报重规划延迟。
+全绿才去接机械臂。
+
+### pi0.5 在本机的实测数字（RTX 5070 Ti 16 GB）
+
+| 项 | 值 |
+| --- | --- |
+| 显存常驻 / 峰值 | 8.71 / 8.88 GiB（16 GiB 够用） |
+| 重规划一次（整 chunk，10 步去噪） | 188 ms |
+| 重规划预算（`n_action_steps=50` @ 16 fps） | 3.12 s → 余量 2.94 s |
+| chunk 内出队帧 | 1.9 ms（预算 62.5 ms） |
+
+算力上很宽裕。**CPU 内存原本是个坑**：`PI05Policy.from_pretrained` 会先按 fp32
+把 4.14B 参数随机初始化一遍（`modeling_pi05.py` 的 `model = cls(config)`），再被
+`load_state_dict` 覆盖掉 —— 这一步瞬时吃 **23.7 GiB**、耗时 **116 s**。本机只有
+30 GiB 内存，同时开着 VSCode 就会触发 OOM killer 把 VSCode 一起带走（现象就是
+VSCode 闪退，见第 9 节）。
+
+`src/evo_rlt/adapters/lerobot/pi05_low_mem_load.py` 修掉了这一点：参数用 meta
+device 建骨架（不分配），再把 checkpoint 的张量直接 `load_state_dict(..., assign=True)`
+挂上去。同样的权重、同样的 key remap 和 strict 语义，**峰值 9.7 GiB、耗时 1.1 s**。
+`backend.py` 只在 `cfg.policy.type == "pi05"` 时装它，其它策略走原路径不受影响。
+
 ## 9. 排障
+
+**加载 pi0.5 时 VSCode 闪退 / 进程被 `Killed`**
+本机只有 30 GiB 内存，而 `PI05Policy.from_pretrained` 有个 **23.7 GiB 的瞬时峰值**
+（fp32 随机初始化 4.14B 参数，随后被 `load_state_dict` 覆盖，纯浪费）。在 VSCode 的
+集成终端里跑，进程属于 `app-code-*.scope` cgroup，全局 OOM killer 会连 VSCode 一起
+带走。确认方法：
+
+```bash
+journalctl -k --since "-1 hour" | grep -iE "oom-kill|Killed process"
+# 看 anon-rss 和 task_memcg=...app-code-*.scope
+```
+
+短期规避：跑重活时套一层内存上限，爆了只杀自己的进程，不动 VSCode。
+
+```bash
+systemd-run --user --scope -p MemoryMax=24G -p MemorySwapMax=8G --quiet \
+  python your_script.py
+```
 
 **`unlicensed` / `Failed to obtain IRobotService`**
 仓库根目录缺 `license.key`。SDK 按进程 CWD 找。

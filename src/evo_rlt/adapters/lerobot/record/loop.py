@@ -208,7 +208,9 @@ def _blend_robot_actions(
 
 
 def _validate_policy_image_features(
-    policy: PreTrainedPolicy, dataset_features: dict[str, dict]
+    policy: PreTrainedPolicy,
+    dataset_features: dict[str, dict],
+    rename_map: dict[str, str] | None = None,
 ) -> None:
     """Check that dataset features include all image features the policy expects.
 
@@ -216,6 +218,9 @@ def _validate_policy_image_features(
     `--dataset.video=false` which silently drops all image features from the
     dataset due to an upstream lerobot limitation in
     `aggregate_pipeline_dataset_features`.
+
+    ``rename_map`` (robot/dataset key -> policy key) is applied before the check,
+    same as the observation preprocessor used at inference.
     """
     policy_image_keys = [
         k for k, ft in policy.config.input_features.items()
@@ -228,7 +233,9 @@ def _validate_policy_image_features(
         k for k, ft in dataset_features.items()
         if ft.get("dtype") in ("image", "video")
     ]
-    missing = [k for k in policy_image_keys if k not in ds_image_keys]
+    rename_map = rename_map or {}
+    ds_image_keys_for_policy = [rename_map.get(k, k) for k in ds_image_keys]
+    missing = [k for k in policy_image_keys if k not in ds_image_keys_for_policy]
     if not missing:
         return
 
@@ -243,6 +250,7 @@ def _validate_policy_image_features(
             f"\n  Policy expects:     {policy_image_keys}"
             "\n  Check camera naming - BiSOFollower auto-prepends left_/right_ "
             "to each arm's camera names."
+            "\n  Or pass --rename-map to map robot camera keys to policy keys."
         )
     raise ValueError(
         f"Policy expects image features {missing} but they are not in "
@@ -288,6 +296,7 @@ def record_loop(
     rl_phase_key_toggles_critical_phase: bool = False,
     start_in_teleop: bool = False,
     intervention_action_blend_time_s: float = 0.0,
+    rename_map: dict[str, str] | None = None,
 ):
     if intervention_action_blend_time_s < 0:
         raise ValueError("intervention_action_blend_time_s must be >= 0")
@@ -327,7 +336,7 @@ def record_loop(
 
     # Early check: verify dataset features include all image features the policy expects.
     if policy is not None and dataset is not None:
-        _validate_policy_image_features(policy, dataset.features)
+        _validate_policy_image_features(policy, dataset.features, rename_map=rename_map)
 
     action_feature_names = dataset.features[ACTION]["names"] if dataset is not None else None
     if action_feature_names is None:

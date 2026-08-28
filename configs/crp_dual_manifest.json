@@ -1,7 +1,7 @@
 {
   "robot_id": "crp_dual",
   "datasets": {
-    "root": "~/intern/RLT_dual/data/crp_dual",
+    "root": "~/RLT_dual/data/crp_dual",
     "fps": 16
   },
   "arms": [

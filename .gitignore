@@ -9,6 +9,9 @@ dist/
 *.egg-info/
 outputs/
 pretrained/
+# pi0.5 SFT 权重: 8.8 GB, 单文件 9.35 GB 超 GitHub 100 MB 上限。
+# 走 HF hub 或内部存储分发, 不入 git。
+pretrained_model/
 cache/
 wandb/
 data/

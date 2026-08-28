@@ -82,6 +82,8 @@ from lerobot.datasets.feature_utils import build_dataset_frame, combine_feature_
 from lerobot.datasets.io_utils import write_info
 from lerobot.datasets.video_utils import VideoEncodingManager
 from lerobot.policies.factory import make_policy, make_pre_post_processors
+
+from evo_rlt.adapters.lerobot.pi05_low_mem_load import install as install_pi05_low_mem_loader
 from lerobot.processor import make_default_processors
 from lerobot.processor.rename_processor import rename_stats
 from lerobot.robots import (  # noqa: F401
@@ -978,8 +980,20 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
             include_rlt_episode_metadata=cfg.rlt.enable,
         )
 
-        # Load pretrained policy
-        policy = None if cfg.policy is None else make_policy(cfg.policy, ds_meta=dataset.meta)
+        # pi0.5's stock loader fp32-random-inits 4.14B params before overwriting them
+        # from the checkpoint: a 23.7 GiB transient that OOMs the 30 GiB deployment
+        # box. No-op for every other policy type. See the module docstring.
+        if cfg.policy is not None and getattr(cfg.policy, "type", None) == "pi05":
+            install_pi05_low_mem_loader()
+
+        # Load pretrained policy. Pass rename_map so camera-name remaps
+        # (e.g. top/left_wrist/right_wrist -> camera1/2/3 for smolVLA) skip the
+        # strict visual-feature check; the preprocessor applies the same map.
+        policy = None if cfg.policy is None else make_policy(
+            cfg.policy,
+            ds_meta=dataset.meta,
+            rename_map=cfg.dataset.rename_map or None,
+        )
         _configure_rlt_record_policy(policy, cfg)
 
         online_collector = None
@@ -1220,6 +1234,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                 start_in_teleop=cfg.rlt.start_in_teleop,
                 intervention_action_blend_time_s=cfg.rlt.intervention_action_blend_time_s,
                 rlt_online_collector=online_collector,
+                rename_map=cfg.dataset.rename_map,
             )
 
         def _current_episode_frame_count() -> int:
