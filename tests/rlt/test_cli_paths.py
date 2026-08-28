@@ -162,3 +162,59 @@ class TestArmSubnetCheck:
     def test_an_unrelated_subnet_is_rejected(self, monkeypatch):
         pf = self._patch(monkeypatch, [("enp12s0", "10.0.0.5/24")])
         assert pf._interface_on_subnet("192.168.0.100") is None
+
+
+class TestCrpFollowerPreflight:
+    """CRP followers have no serial port, so the SO101 motor preflight must skip them.
+
+    The controller owns the joints and the SDK reaches it over Ethernet, so the
+    manifest carries ip/gp_index and no `port`; building an SOFollower from one
+    raised `KeyError: 'port'`. Only run_segment and the online-RL CLI call this,
+    and neither had ever run against a CRP manifest.
+    """
+
+    CRP_FOLLOWERS = [
+        {"alias": "left_follower", "type": "follower", "kind": "crp", "ip": "192.168.0.100"},
+        {"alias": "right_follower", "type": "follower", "kind": "crp", "ip": "192.168.0.101"},
+    ]
+
+    def test_crp_followers_are_recognised(self):
+        from evo_rlt.adapters.lerobot.record.common import is_crp_setup
+
+        assert is_crp_setup(self.CRP_FOLLOWERS)
+
+    def test_so101_followers_are_not(self):
+        from evo_rlt.adapters.lerobot.record.common import is_crp_setup
+
+        assert not is_crp_setup([{"type": "follower", "port": "/dev/ttyACM0"}])
+
+    def test_preflight_skips_crp_followers_instead_of_raising(self, tmp_path, caplog):
+        import logging
+
+        from evo_rlt.adapters.lerobot.record import common
+
+        caplog.set_level(logging.INFO)
+
+        # No leaders, so the function returns right after the follower half --
+        # which is the half that used to blow up on the missing 'port'.
+        common.preflight_motor_connections(
+            followers=self.CRP_FOLLOWERS, leaders=[],
+            cal_dir=str(tmp_path), leader_cal_dir=None,
+        )
+        assert "no host-side motor bus" in caplog.text
+
+    def test_so101_followers_still_reach_the_motor_check(self, tmp_path, monkeypatch):
+        """The skip must be gated on `kind`, not applied to every setup."""
+        from evo_rlt.adapters.lerobot.record import common
+
+        reached = []
+        monkeypatch.setattr(common, "install_safe_follower_torque_enable",
+                            lambda robot: reached.append(robot))
+        with pytest.raises(Exception):
+            # Connecting to a port that does not exist is expected; getting that far
+            # is the point -- a KeyError before it would mean the guard over-applied.
+            common.preflight_motor_connections(
+                followers=[{"type": "follower", "port": "/dev/nonexistent-A"},
+                           {"type": "follower", "port": "/dev/nonexistent-B"}],
+                leaders=[], cal_dir=str(tmp_path), leader_cal_dir=None,
+            )

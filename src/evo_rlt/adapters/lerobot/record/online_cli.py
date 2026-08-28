@@ -305,7 +305,10 @@ def run_online_train(args: argparse.Namespace) -> None:
     with TemporaryDirectory(prefix="online-train-") as cal_dir:
         stage_follower_calibrations(setup.followers, cal_dir)
         leader_cal_dir = stage_leader_calibrations(setup.leaders, teleop_argv)
-        if args.preflight:
+        # --dry-run must not touch hardware -- it exists to check the argv before
+        # anything is connected. runner.py's run_segment already guards this way;
+        # online_cli did not, so a dry run tried to torque the arms.
+        if args.preflight and not args.dry_run:
             preflight_motor_connections(
                 setup.followers, setup.leaders, cal_dir,
                 leader_cal_dir.name if leader_cal_dir is not None else None,

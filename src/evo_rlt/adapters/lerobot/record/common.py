@@ -511,30 +511,42 @@ def preflight_motor_connections(
         if getattr(device, "is_connected", False):
             device.disconnect()
 
-    log.info("Preflight checking follower motor connections before loading policy")
-    if len(followers) == 1:
-        robot = SOFollower(
-            SOFollowerRobotConfig(
-                id=FOLLOWER_ID_SINGLE,
-                calibration_dir=Path(cal_dir),
-                port=followers[0]["port"],
-            )
+    # CRP followers have no host-side motor bus to check: the controller owns the
+    # joints and the SDK reaches it over Ethernet, so the manifest carries
+    # `ip`/`gp_index` and no `port`. Building an SOFollower from one raised
+    # KeyError: 'port'. Same guard stage_follower_calibrations already applies --
+    # and only the follower half is skipped, since the leaders below are SO101 on
+    # serial for the CRP setup too.
+    if is_crp_setup(followers):
+        log.info(
+            "CRP followers: no host-side motor bus to preflight "
+            "(the SDK checks reachability when it connects)."
         )
     else:
-        robot = BiSOFollower(
-            BiSOFollowerConfig(
-                id="bimanual",
-                calibration_dir=Path(cal_dir),
-                left_arm_config=SOFollowerConfig(port=followers[0]["port"], use_degrees=True),
-                right_arm_config=SOFollowerConfig(port=followers[1]["port"], use_degrees=True),
+        log.info("Preflight checking follower motor connections before loading policy")
+        if len(followers) == 1:
+            robot = SOFollower(
+                SOFollowerRobotConfig(
+                    id=FOLLOWER_ID_SINGLE,
+                    calibration_dir=Path(cal_dir),
+                    port=followers[0]["port"],
+                )
             )
-        )
-    install_safe_follower_torque_enable(robot)
-    try:
-        robot.connect(calibrate=True)
-        log.info("Preflight follower motor check passed")
-    finally:
-        disconnect(robot)
+        else:
+            robot = BiSOFollower(
+                BiSOFollowerConfig(
+                    id="bimanual",
+                    calibration_dir=Path(cal_dir),
+                    left_arm_config=SOFollowerConfig(port=followers[0]["port"], use_degrees=True),
+                    right_arm_config=SOFollowerConfig(port=followers[1]["port"], use_degrees=True),
+                )
+            )
+        install_safe_follower_torque_enable(robot)
+        try:
+            robot.connect(calibrate=True)
+            log.info("Preflight follower motor check passed")
+        finally:
+            disconnect(robot)
 
     if not leaders or leader_cal_dir is None:
         return
