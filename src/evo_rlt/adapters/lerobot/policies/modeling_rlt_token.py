@@ -122,6 +122,15 @@ class RLTokenPolicy(PreTrainedPolicy):
     # ------------------------------------------------------------------
 
     def _load_pi05_backbone(self) -> PI05Policy:
+        # The single place rlt_token (and therefore rlt_ac, which wraps it) pulls in
+        # pi0.5. backend.py installs the low-memory loader only when the *outer*
+        # policy type is "pi05", so the online-RL path -- type "rlt_ac" -- was still
+        # taking the stock loader's 23.7 GiB fp32-random-init transient and OOMing
+        # the 30 GiB box mid-startup. Installing it here covers every caller.
+        from evo_rlt.adapters.lerobot.pi05_low_mem_load import install
+
+        install()
+
         pi05_cfg = _load_pi05_config_from_dir(self.config.vla_pretrained_path)
         pi05_cfg.dtype = self.config.vla_dtype
         pi05_cfg.device = self.config.device

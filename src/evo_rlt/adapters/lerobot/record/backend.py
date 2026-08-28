@@ -989,7 +989,11 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
         # pi0.5's stock loader fp32-random-inits 4.14B params before overwriting them
         # from the checkpoint: a 23.7 GiB transient that OOMs the 30 GiB deployment
         # box. No-op for every other policy type. See the module docstring.
-        if cfg.policy is not None and getattr(cfg.policy, "type", None) == "pi05":
+        # rlt_token / rlt_ac reach pi0.5 through RLTokenPolicy._load_pi05_backbone(),
+        # which installs this itself; the gate here covers deploying raw pi0.5.
+        if cfg.policy is not None and getattr(cfg.policy, "type", None) in (
+            "pi05", "rlt_ac", "rlt_token",
+        ):
             install_pi05_low_mem_loader()
 
         # Load pretrained policy. Pass rename_map so camera-name remaps
