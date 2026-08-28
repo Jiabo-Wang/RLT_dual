@@ -242,8 +242,8 @@ class CRPArmDual(Robot):
 
         connected_cams: list = []
         try:
-            for cam in self.cameras.values():
-                cam.connect()
+            for name, cam in self.cameras.items():
+                self._connect_camera_with_retry(name, cam)
                 connected_cams.append(cam)
         except Exception as exc:
             for cam in connected_cams:
@@ -254,8 +254,48 @@ class CRPArmDual(Robot):
             self._disconnect_crp_after_failed_connect(crp)
             raise ConnectionError(
                 f"{self} camera connect failed (arms were disconnected). "
-                "Run `lerobot-find-cameras` and update --robot.cameras (Orbbec / RealSense serials)."
+                f"{exc}\n"
+                "  If a previous run was killed, its v4l2 nodes take ~15 s to release; "
+                "`fuser -v /dev/video*` shows anything still holding them.\n"
+                "  If the serial is genuinely gone, run `lerobot-find-cameras` and update "
+                "--robot.cameras (Orbbec / RealSense serials)."
             ) from exc
+
+    # Each attempt is cheap and the arms are already powered at this point, so waiting
+    # beats failing: a killed predecessor's v4l2 nodes release slowly, and while the
+    # device is still held VIDIOC_S_FMT fails, which surfaces as OpenCVCamera's
+    # "failed to set capture_width" -- note that error reports the *actual* width as
+    # already correct; only cap.set()'s return value is False. Retrying was measured
+    # to clear it; the same connect succeeds seconds later untouched.
+    _CAMERA_CONNECT_ATTEMPTS = 4
+    _CAMERA_RETRY_DELAY_S = 5.0
+
+    def _connect_camera_with_retry(self, name: str, cam: Any) -> None:
+        last: Exception | None = None
+        for attempt in range(1, self._CAMERA_CONNECT_ATTEMPTS + 1):
+            try:
+                cam.connect()
+                if attempt > 1:
+                    logger.info("Camera %s connected on attempt %d.", name, attempt)
+                return
+            except Exception as exc:
+                last = exc
+                if attempt == self._CAMERA_CONNECT_ATTEMPTS:
+                    break
+                logger.warning(
+                    "Camera %s failed to connect (attempt %d/%d): %s. Retrying in %.0fs -- "
+                    "a v4l2 node held by a killed run releases slowly.",
+                    name, attempt, self._CAMERA_CONNECT_ATTEMPTS, exc, self._CAMERA_RETRY_DELAY_S,
+                )
+                try:
+                    cam.disconnect()
+                except Exception:
+                    pass
+                time.sleep(self._CAMERA_RETRY_DELAY_S)
+        raise RuntimeError(
+            f"camera {name!r} did not connect after {self._CAMERA_CONNECT_ATTEMPTS} attempts "
+            f"over {self._CAMERA_RETRY_DELAY_S * (self._CAMERA_CONNECT_ATTEMPTS - 1):.0f}s: {last}"
+        ) from last
 
         self.configure()
         if self.config.init_gj_on_connect:

@@ -208,6 +208,15 @@ def _camera_dict(camera: dict[str, Any]) -> dict[str, Any]:
         "width": camera.get("width", 640),
         "height": camera.get("height", 480),
         "fps": camera.get("fps", 30),
+        # 200 = cv2.CAP_V4L2. LeRobot defaults to CAP_ANY, which on this host picks a
+        # backend whose cap.set(CAP_PROP_FRAME_WIDTH) returns False even when the
+        # width it reports back is already the requested one -- and OpenCVCamera
+        # treats that False as fatal, so all three cameras failed to connect with
+        # "failed to set capture_width=640 (actual_width=640, width_success=False)".
+        # Measured on 2026-08-28: 0/3 cameras connect under CAP_ANY, 3/3 under V4L2,
+        # same nodes, same moment. These are USB UVC devices on Linux; V4L2 is the
+        # backend they are actually driven through either way.
+        "backend": camera.get("backend", 200),
     }
 
 
