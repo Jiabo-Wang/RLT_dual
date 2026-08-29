@@ -1324,6 +1324,16 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                 # Never let the return trip abort a session that has already recorded
                 # its episode -- the operator can always reposition by hand.
                 logging.warning("go-home failed (%s); continuing.", exc)
+            finally:
+                # Whether or not it arrived, the arm is no longer where the leader
+                # mapper thinks it is, and the reset window that follows is pure
+                # teleop. Without this the first leader frame commands
+                # stale_reference + delta and yanks the arm back to the pose it just
+                # left -- on hardware that was the insertion pose, with both arms
+                # close together. Re-aligning costs one frame and cannot overshoot.
+                invalidate = getattr(robot_action_processor, "invalidate_alignment", None)
+                if callable(invalidate):
+                    invalidate()
 
         def _run_reset_loop_if_needed(recorded_episodes: int) -> None:
             _go_home_if_requested()

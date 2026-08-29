@@ -173,3 +173,38 @@ class TestManifestWriting:
         assert "home_tcp" not in written["arms"][1]
         written["arms"][0].pop("home_tcp")
         assert written == original
+
+
+class TestSameposeGuard:
+    """Re-recording the pose the arm was already parked at is the mistake that
+    made go-home drive to the workpiece-alignment position instead of home."""
+
+    from evo_rlt.adapters.crp.set_home import SAME_POSE_MM, _unchanged_from_manifest
+
+    @staticmethod
+    def _manifest(stored):
+        return {"arms": [{"alias": "left_follower", "type": "follower", "home_tcp": stored}]}
+
+    def test_an_identical_pose_is_flagged(self):
+        from evo_rlt.adapters.crp.set_home import _unchanged_from_manifest
+
+        flagged = _unchanged_from_manifest(self._manifest(HOME), {"left_follower": list(HOME)})
+        assert [a for a, _ in flagged] == ["left_follower"]
+
+    def test_a_pose_a_few_mm_away_is_still_flagged(self):
+        from evo_rlt.adapters.crp.set_home import _unchanged_from_manifest
+
+        near = [HOME[0] + 1.0, *HOME[1:]]
+        assert _unchanged_from_manifest(self._manifest(HOME), {"left_follower": near})
+
+    def test_a_genuinely_different_pose_passes(self):
+        from evo_rlt.adapters.crp.set_home import _unchanged_from_manifest
+
+        far = [HOME[0] + 200.0, *HOME[1:]]
+        assert _unchanged_from_manifest(self._manifest(HOME), {"left_follower": far}) == []
+
+    def test_a_manifest_without_home_yet_passes(self):
+        from evo_rlt.adapters.crp.set_home import _unchanged_from_manifest
+
+        manifest = {"arms": [{"alias": "left_follower", "type": "follower"}]}
+        assert _unchanged_from_manifest(manifest, {"left_follower": list(HOME)}) == []

@@ -60,6 +60,23 @@ class CrpLeaderActionToGp:
         )
         self._arms: tuple[Any, Any] | None = None
 
+    def invalidate_alignment(self) -> None:
+        """Force a re-align against the follower's TCP on the next leader frame.
+
+        Alignment is what keeps the follower from jumping to the leader's absolute
+        pose: the mapping is relative to wherever the follower stood when teleop
+        engaged. Anything that moves the follower *outside* this mapper -- go-home
+        is the one such path -- leaves that reference pointing at the old pose, and
+        the next leader frame commands `stale_reference + leader_delta`, i.e. a jump
+        straight back to where the arm was before. Observed on hardware: the arms
+        returned home after `f`, then jumped back to the insertion pose with the two
+        of them close together.
+        """
+        if self._arms is not None:
+            logger.info("CRP action mapper: alignment invalidated; will re-align "
+                        "against the current TCP on the next leader frame.")
+        self._arms = None
+
     def _ensure_aligned(self, arm_actions: tuple[dict, dict]) -> tuple[Any, Any]:
         if self._arms is not None:
             return self._arms
